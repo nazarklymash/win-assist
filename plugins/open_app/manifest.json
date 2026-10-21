@@ -1,0 +1,23 @@
+{
+  "id": "open_app",
+  "name": "Open Application",
+  "version": "1.0.0",
+  "description": "Launches installed applications by name using Start menu shortcuts.",
+  "type": "script",
+  "runtime": "powershell",
+  "entry": "open_app.ps1",
+  "timeout_ms": 8000,
+  "intents": [
+    {
+      "name": "open_application",
+      "description": "Open or launch an installed application by its name",
+      "patterns": [
+        "[please] (open|launch) [the] {app_name}",
+        "[please] (open|launch) [the] {app_name} app"
+      ],
+      "parameters": {
+        "app_name": { "type": "string", "description": "Application name, e.g. notepad, Spotify, Visual Studio Code" }
+      }
+    }
+  ]
+}

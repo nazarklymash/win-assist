@@ -1,0 +1,34 @@
+{
+  "id": "clipboard_search",
+  "name": "Clipboard Search",
+  "version": "1.0.0",
+  "description": "Remembers recently copied text (in memory only) and finds it again.",
+  "type": "native",
+  "entry": "clipboard_search.dll",
+  "timeout_ms": 30000,
+  "intents": [
+    {
+      "name": "search_clipboard",
+      "description": "Find a previously copied piece of text in the clipboard history and copy it again",
+      "patterns": [
+        "search [my] clipboard for {query}",
+        "find {query} in [my] clipboard [history]",
+        "(what did i copy|find what i copied) about {query}"
+      ],
+      "parameters": {
+        "query": { "type": "string", "description": "Words or topic of the copied text to find" }
+      }
+    },
+    {
+      "name": "clipboard_history",
+      "description": "Show the most recent clipboard history entries",
+      "patterns": ["(show|list) [my] clipboard [history]", "clipboard history"]
+    },
+    {
+      "name": "clear_clipboard_history",
+      "description": "Forget the clipboard history kept by the assistant",
+      "patterns": ["(clear|forget|delete) [my] clipboard history"],
+      "expose_to_llm": false
+    }
+  ]
+}

@@ -1,0 +1,78 @@
+{
+  "id": "system_controls",
+  "name": "System Controls",
+  "version": "1.0.0",
+  "description": "Volume, media playback, screen brightness, lock and sleep.",
+  "type": "native",
+  "entry": "system_controls.dll",
+  "timeout_ms": 5000,
+  "intents": [
+    {
+      "name": "volume_up",
+      "description": "Increase system volume",
+      "patterns": ["(volume|sound) up", "turn [the] (volume|sound) up", "turn up the (volume|sound)", "louder"]
+    },
+    {
+      "name": "volume_down",
+      "description": "Decrease system volume",
+      "patterns": ["(volume|sound) down", "turn [the] (volume|sound) down", "turn down the (volume|sound)", "quieter"]
+    },
+    {
+      "name": "set_volume",
+      "description": "Set system volume to a specific level",
+      "patterns": ["set [the] (volume|sound) to {level}", "(volume|sound) {level} [percent]"],
+      "parameters": {
+        "level": {
+          "type": "integer",
+          "description": "Volume percentage 0-100"
+        }
+      }
+    },
+    {
+      "name": "mute",
+      "description": "Mute system sound",
+      "patterns": ["mute", "mute [the] (sound|volume|audio)"]
+    },
+    {
+      "name": "unmute",
+      "description": "Unmute system sound",
+      "patterns": ["unmute", "unmute [the] (sound|volume|audio)"]
+    },
+    {
+      "name": "media_play_pause",
+      "description": "Play or pause media",
+      "patterns": ["(play|pause|resume) [the] (music|media|song|video)", "(play|pause)"]
+    },
+    {
+      "name": "media_next",
+      "description": "Skip to the next media track",
+      "patterns": ["next (song|track)", "skip [this] (song|track)"]
+    },
+    {
+      "name": "media_previous",
+      "description": "Go back to the previous media track",
+      "patterns": ["previous (song|track)", "go back a (song|track)"]
+    },
+    {
+      "name": "set_brightness",
+      "description": "Set screen brightness to a specific level",
+      "patterns": ["set [the] brightness to {level}", "brightness {level} [percent]"],
+      "parameters": {
+        "level": {
+          "type": "integer",
+          "description": "Screen brightness percentage 0-100"
+        }
+      }
+    },
+    {
+      "name": "lock_computer",
+      "description": "Lock the computer screen",
+      "patterns": ["lock [the|my] (computer|pc|screen|workstation)"]
+    },
+    {
+      "name": "sleep_computer",
+      "description": "Put the computer to sleep",
+      "patterns": ["put [the|my] (computer|pc) to sleep", "sleep [the|my] (computer|pc)"]
+    }
+  ]
+}

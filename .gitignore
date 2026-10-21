@@ -1,0 +1,6 @@
+/build/
+/out/
+/models/*
+!/models/.gitkeep
+.vs/
+*.user
