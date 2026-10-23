@@ -1,0 +1,52 @@
+{
+  "id": "web_browse",
+  "name": "Web & Media",
+  "version": "1.0.0",
+  "description": "Open URLs, search the web or YouTube, control Spotify-style apps via media keys.",
+  "type": "script",
+  "runtime": "powershell",
+  "entry": "web_browse.ps1",
+  "timeout_ms": 8000,
+  "intents": [
+    {
+      "name": "open_url",
+      "description": "Open a URL in the default browser",
+      "patterns": [
+        "[please] (open|go to|visit) [the] (url|website|site|page) {url}",
+        "[please] open {url}",
+        "відкрий [сайт|сторінку] {url}"
+      ],
+      "parameters": {
+        "url": { "type": "string", "description": "URL or domain, e.g. github.com" }
+      }
+    },
+    {
+      "name": "web_search",
+      "description": "Search the web with the default browser",
+      "patterns": [
+        "[please] (search|google|bing) [the web for|for] {query}",
+        "(пошукай|знайди в інтернеті) {query}"
+      ],
+      "parameters": {
+        "query": { "type": "string", "description": "Search query" }
+      }
+    },
+    {
+      "name": "youtube_search",
+      "description": "Search YouTube",
+      "patterns": [
+        "[please] (search|find) [on] youtube [for] {query}",
+        "youtube {query}",
+        "ютуб {query}"
+      ],
+      "parameters": {
+        "query": { "type": "string", "description": "YouTube search query" }
+      }
+    },
+    {
+      "name": "open_spotify",
+      "description": "Open Spotify (app or web)",
+      "patterns": ["[please] open spotify", "відкрий спотіфай"]
+    }
+  ]
+}

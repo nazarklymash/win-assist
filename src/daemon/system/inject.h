@@ -25,4 +25,8 @@ void wait_for_modifier_release(int timeout_ms);
 bool set_clipboard_text(std::wstring_view text, bool exclude_from_history);
 std::wstring get_clipboard_text();
 
+// Copies the current selection in `target` via Ctrl+C, restoring the previous
+// clipboard contents afterwards. Returns false when nothing was selected.
+bool capture_selection(const TargetInfo& target, std::wstring& out, std::string& error);
+
 }  // namespace wa

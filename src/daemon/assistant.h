@@ -14,6 +14,7 @@
 #include "core/manifest.h"
 #include "daemon/ai/providers.h"
 #include "daemon/ai/stt.h"
+#include "daemon/memory/memory.h"
 #include "daemon/plugins/host.h"
 #include "daemon/system/target.h"
 
@@ -49,7 +50,8 @@ std::vector<PluginManifest> builtin_manifests();
 // speech-to-text -> intent router -> plugin, or LLM (with tool calling) -> result.
 class Assistant {
 public:
-    Assistant(HWND notify, UINT message, PluginHost& plugins, ProviderHub& providers, SttClient& stt);
+    Assistant(HWND notify, UINT message, PluginHost& plugins, ProviderHub& providers, SttClient& stt,
+              MemoryStore& memory);
     ~Assistant();
 
     void start(SessionRequest request);
@@ -68,15 +70,27 @@ private:
     ActionResult run_builtin(const std::string& intent, const nlohmann::json& params, const SessionRequest& request,
                              const std::string& utterance);
     ActionResult ask_llm(const std::string& utterance, const SessionRequest& request, std::string& answer);
+    ActionResult narrate_tool_result(const std::string& utterance, const std::string& intent,
+                                     const std::string& tool_display, const SessionRequest& request,
+                                     std::string& follow_up);
     ActionResult compose(const std::string& instruction, const SessionRequest& request);
     ActionResult describe_screen(const std::string& question, const SessionRequest& request);
+    // Answers a screen question from OCR text when no vision model is usable.
+    ActionResult answer_from_screen_text(const std::string& question, const std::string& screen_text,
+                                         const SessionRequest& request);
+    // mode: summarize | translate | fix | reply | explain | commit
+    ActionResult process_selection(const std::string& mode, const std::string& language,
+                                   const SessionRequest& request);
     std::string system_context(const SessionRequest& request) const;
+    // Relevant notes for `utterance`, formatted for the system prompt.
+    std::string recalled_context(const std::string& utterance);
 
     HWND notify_;
     UINT message_;
     PluginHost& plugins_;
     ProviderHub& providers_;
     SttClient& stt_;
+    MemoryStore& memory_;
 
     std::thread thread_;
     std::atomic<uint64_t> session_{0};

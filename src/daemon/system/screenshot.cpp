@@ -27,7 +27,7 @@ struct ComScope {
 
 }  // namespace
 
-std::optional<std::string> capture_window_png_base64(HWND hwnd, int max_edge, std::string& error) {
+std::optional<std::vector<uint8_t>> capture_window_png(HWND hwnd, int max_edge, std::string& error) {
     RECT rc{};
     if (!hwnd || !GetWindowRect(hwnd, &rc)) {
         error = "no window to capture";
@@ -63,7 +63,14 @@ std::optional<std::string> capture_window_png_base64(HWND hwnd, int max_edge, st
     auto* px = static_cast<uint32_t*>(bits);
     for (size_t i = 0, n = static_cast<size_t>(width) * height; i < n; ++i) px[i] |= 0xFF000000u;
 
-    std::optional<std::string> result;
+    auto result = encode_bitmap_png(bitmap, width, height, max_edge, error);
+    DeleteObject(bitmap);
+    return result;
+}
+
+std::optional<std::vector<uint8_t>> encode_bitmap_png(HBITMAP bitmap, int width, int height, int max_edge,
+                                                      std::string& error) {
+    std::optional<std::vector<uint8_t>> result;
     {
         ComScope com;
         ComPtr<IWICImagingFactory> factory;
@@ -98,15 +105,20 @@ std::optional<std::string> capture_window_png_base64(HWND hwnd, int max_edge, st
         if (SUCCEEDED(hr)) {
             STATSTG stat{};
             stream->Stat(&stat, STATFLAG_NONAME);
-            const void* data = GlobalLock(global);
-            result = base64_encode(data, static_cast<size_t>(stat.cbSize.QuadPart));
+            const auto* data = static_cast<const uint8_t*>(GlobalLock(global));
+            result = std::vector<uint8_t>(data, data + static_cast<size_t>(stat.cbSize.QuadPart));
             GlobalUnlock(global);
         } else {
             error = "PNG encoding failed";
         }
     }
-    DeleteObject(bitmap);
     return result;
+}
+
+std::optional<std::string> capture_window_png_base64(HWND hwnd, int max_edge, std::string& error) {
+    auto png = capture_window_png(hwnd, max_edge, error);
+    if (!png) return std::nullopt;
+    return base64_encode(png->data(), png->size());
 }
 
 }  // namespace wa

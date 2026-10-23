@@ -3,6 +3,7 @@
 #include <d2d1.h>
 #include <dwrite.h>
 #include <shellscalingapi.h>
+#include <windowsx.h>
 
 #include <algorithm>
 #include <cmath>
@@ -44,6 +45,7 @@ Palette palette_for(OverlayView::Mode mode) {
         case OverlayView::Mode::Processing: return {0x7B61FF, 0x4CC9F0};
         case OverlayView::Mode::Response: return {0x2EC4B6, 0x4CC9F0};
         case OverlayView::Mode::Error: return {0xFFB703, 0xFB8500};
+        case OverlayView::Mode::Confirm: return {0xFF4D6D, 0xFFB703};
     }
     return {0x4CC9F0, 0x4361EE};
 }
@@ -60,9 +62,21 @@ IDWriteTextFormat* make_format(IDWriteFactory* dw, float size, DWRITE_FONT_WEIGH
     return format;
 }
 
+bool mode_has_composer(OverlayView::Mode mode) {
+    return mode == OverlayView::Mode::Input || mode == OverlayView::Mode::Response ||
+           mode == OverlayView::Mode::Error || mode == OverlayView::Mode::Processing;
+}
+
+// Confirm takes keyboard focus but shows buttons instead of a text field.
+bool mode_is_modal(OverlayView::Mode mode) { return mode == OverlayView::Mode::Confirm; }
+
 }  // namespace
 
 Overlay::~Overlay() { destroy(); }
+
+bool Overlay::composer_active() const {
+    return visible_ && mode_has_composer(view_.mode) && view_.mode != OverlayView::Mode::Processing;
+}
 
 bool Overlay::create(HINSTANCE instance, Callbacks callbacks) {
     callbacks_ = std::move(callbacks);
@@ -141,11 +155,27 @@ bool Overlay::ensure_resources() {
         safe_release(body_format_);
         safe_release(hint_format_);
         heading_format_ = make_format(dwrite_, 12.5f * s, DWRITE_FONT_WEIGHT_SEMI_BOLD);
-        body_format_ = make_format(dwrite_, 16.0f * s, DWRITE_FONT_WEIGHT_NORMAL);
+        body_format_ = make_format(dwrite_, 15.0f * s, DWRITE_FONT_WEIGHT_NORMAL);
         hint_format_ = make_format(dwrite_, 11.5f * s, DWRITE_FONT_WEIGHT_NORMAL);
         format_scale_ = s;
     }
     return heading_format_ && body_format_ && hint_format_;
+}
+
+void Overlay::stick_chat_to_bottom() {
+    stick_bottom_ = true;
+    chat_scroll_ = 0.0f;
+}
+
+void Overlay::scroll_by(float delta_px) {
+    if (chat_content_h_ <= chat_viewport_h_) {
+        chat_scroll_ = 0.0f;
+        stick_bottom_ = true;
+        return;
+    }
+    const float max_scroll = chat_content_h_ - chat_viewport_h_;
+    chat_scroll_ = std::clamp(chat_scroll_ + delta_px, 0.0f, max_scroll);
+    stick_bottom_ = chat_scroll_ <= 1.0f;
 }
 
 void Overlay::show(const OverlayView& view, HWND anchor) {
@@ -158,12 +188,13 @@ void Overlay::show(const OverlayView& view, HWND anchor) {
     visible_ = true;
     fade_target_ = 1.0f;
     focus_reclaimed_ = false;
-    set_interactive(view.mode == OverlayView::Mode::Input);
+    stick_chat_to_bottom();
+    set_interactive(mode_has_composer(view.mode) || mode_is_modal(view.mode));
     last_tick_ = std::chrono::steady_clock::now();
     render();
     ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
     SetWindowPos(hwnd_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    if (interactive_) {
+    if (composer_active() || confirm_active()) {
         force_foreground(hwnd_);
         SetFocus(hwnd_);
     }
@@ -172,14 +203,22 @@ void Overlay::show(const OverlayView& view, HWND anchor) {
 
 void Overlay::update(const OverlayView& view) {
     if (!visible_) return;
-    const bool was_input = view_.mode == OverlayView::Mode::Input;
+    const bool stick = stick_bottom_;
+    const bool was_modal = mode_is_modal(view_.mode);
     view_ = view;
-    if (was_input && view.mode != OverlayView::Mode::Input) set_interactive(false);
+    set_interactive(mode_has_composer(view.mode) || mode_is_modal(view.mode));
+    if (stick) stick_chat_to_bottom();
     render();
+    // A confirmation must be able to receive Enter/Esc the moment it appears.
+    if (!was_modal && mode_is_modal(view.mode)) {
+        force_foreground(hwnd_);
+        SetFocus(hwnd_);
+    }
 }
 
-void Overlay::append_body(std::wstring_view text) {
-    view_.body.append(text);
+void Overlay::append_chat(std::wstring_view text) {
+    view_.chat.append(text);
+    if (stick_bottom_) chat_scroll_ = 0.0f;
     if (visible_) render();
 }
 
@@ -241,35 +280,67 @@ void Overlay::render() {
     if (!hwnd_ || !ensure_resources()) return;
     const float s = scale();
     const float width = std::round(width_dip_ * s);
-    const float pad = 18.0f * s;
+    const float pad = 16.0f * s;
     const float orb = 34.0f * s;
-    const float text_x = pad + orb + 16.0f * s;
+    const float text_x = pad + orb + 14.0f * s;
     const float text_w = width - text_x - pad;
-    const float max_body_h = 360.0f * s;
-
-    const bool input = view_.mode == OverlayView::Mode::Input;
-    const std::wstring body = view_.body.empty() && input ? L"Ask anything\u2026" : view_.body;
+    const float max_chat_h = 360.0f * s;
+    const float prompt_min_h = 28.0f * s;
+    const bool composer = mode_has_composer(view_.mode);
+    const bool listening = view_.mode == OverlayView::Mode::Listening;
 
     IDWriteTextLayout* heading = nullptr;
-    IDWriteTextLayout* body_layout = nullptr;
+    IDWriteTextLayout* chat_layout = nullptr;
+    IDWriteTextLayout* prompt_layout = nullptr;
     IDWriteTextLayout* hint = nullptr;
+
     dwrite_->CreateTextLayout(view_.heading.c_str(), static_cast<UINT32>(view_.heading.size()), heading_format_, text_w,
-                              100.0f * s, &heading);
-    dwrite_->CreateTextLayout(body.c_str(), static_cast<UINT32>(body.size()), body_format_, text_w, max_body_h,
-                              &body_layout);
+                              80.0f * s, &heading);
+
+    const std::wstring& chat_text = view_.chat;
+    dwrite_->CreateTextLayout(chat_text.c_str(), static_cast<UINT32>(chat_text.size()), body_format_, text_w,
+                              4000.0f * s, &chat_layout);
+
+    const bool prompt_placeholder = composer && view_.prompt.empty() && view_.mode != OverlayView::Mode::Processing;
+    const std::wstring prompt_draw =
+        prompt_placeholder ? L"Message win-assist\u2026" : view_.prompt;
+    if (composer) {
+        dwrite_->CreateTextLayout(prompt_draw.c_str(), static_cast<UINT32>(prompt_draw.size()), body_format_, text_w,
+                                  120.0f * s, &prompt_layout);
+    }
     if (!view_.hint.empty()) {
         dwrite_->CreateTextLayout(view_.hint.c_str(), static_cast<UINT32>(view_.hint.size()), hint_format_, text_w,
                                   60.0f * s, &hint);
     }
-    DWRITE_TEXT_METRICS hm{}, bm{}, tm{};
+
+    DWRITE_TEXT_METRICS hm{}, cm{}, pm{}, tm{};
     if (heading) heading->GetMetrics(&hm);
-    if (body_layout) body_layout->GetMetrics(&bm);
+    if (chat_layout) chat_layout->GetMetrics(&cm);
+    if (prompt_layout) prompt_layout->GetMetrics(&pm);
     if (hint) hint->GetMetrics(&tm);
+
     const float heading_h = view_.heading.empty() ? 0.0f : hm.height;
-    const float body_h = body.empty() ? 0.0f : std::min(bm.height, max_body_h);
-    const float gap = 4.0f * s;
-    float content_h = heading_h + (heading_h > 0 && body_h > 0 ? gap : 0.0f) + body_h;
-    if (hint) content_h += 8.0f * s + tm.height;
+    chat_content_h_ = chat_text.empty() ? 0.0f : cm.height;
+    chat_viewport_h_ = std::min(max_chat_h, std::max(chat_content_h_, listening ? 0.0f : 48.0f * s));
+    if (chat_content_h_ <= chat_viewport_h_) {
+        chat_scroll_ = 0.0f;
+        stick_bottom_ = true;
+    } else if (stick_bottom_) {
+        chat_scroll_ = 0.0f;
+    } else {
+        chat_scroll_ = std::clamp(chat_scroll_, 0.0f, chat_content_h_ - chat_viewport_h_);
+    }
+
+    const bool confirming = view_.mode == OverlayView::Mode::Confirm;
+    const float button_h = confirming ? 30.0f * s : 0.0f;
+    const float prompt_h = composer ? std::max(prompt_min_h, pm.height + 10.0f * s) : 0.0f;
+    const float hint_h = hint ? tm.height + 6.0f * s : 0.0f;
+    const float gap = 6.0f * s;
+    float content_h = heading_h;
+    if (chat_viewport_h_ > 0) content_h += (content_h > 0 ? gap : 0) + chat_viewport_h_;
+    if (prompt_h > 0) content_h += gap + prompt_h + 2.0f * s;  // divider + field
+    if (button_h > 0) content_h += gap + button_h;
+    if (hint_h > 0) content_h += hint_h;
     const float height = std::round(std::max(orb + 2 * pad, content_h + 2 * pad));
     const int w = static_cast<int>(width);
     const int h = static_cast<int>(height);
@@ -314,9 +385,8 @@ void Overlay::render() {
     brush->SetColor(rgba(0xFFFFFF, 0.09f));
     target_->DrawRoundedRectangle(panel, brush, 1.0f);
 
-    // Orb: a gradient disc whose glow follows the mic level or a spinner.
     const Palette pal = palette_for(view_.mode);
-    const D2D1_POINT_2F center = D2D1::Point2F(pad + orb / 2, height / 2);
+    const D2D1_POINT_2F center = D2D1::Point2F(pad + orb / 2, pad + orb / 2);
     float pulse = 0.0f;
     if (view_.mode == OverlayView::Mode::Listening) pulse = level_smoothed_;
     else if (view_.mode == OverlayView::Mode::Processing) pulse = 0.25f + 0.15f * std::sin(t * 5.0f);
@@ -353,30 +423,91 @@ void Overlay::render() {
         }
     }
 
-    float y = (height - content_h) / 2;
+    float y = pad;
     if (heading && heading_h > 0) {
         brush->SetColor(rgba(0xA9ADBB));
         target_->DrawTextLayout(D2D1::Point2F(text_x, y), heading, brush);
         y += heading_h + gap;
     }
-    if (body_layout && body_h > 0) {
-        brush->SetColor(input && view_.body.empty() ? rgba(0x6E7280) : rgba(0xF3F4F7));
-        target_->PushAxisAlignedClip(D2D1::RectF(text_x, y, text_x + text_w, y + body_h), D2D1_ANTIALIAS_MODE_ALIASED);
-        target_->DrawTextLayout(D2D1::Point2F(text_x, y), body_layout, brush);
+
+    if (chat_layout && chat_viewport_h_ > 0) {
+        const float chat_top = y;
+        const float chat_bottom = y + chat_viewport_h_;
+        // Draw from bottom of content upward by scroll_offset.
+        const float draw_y = chat_bottom - chat_content_h_ + chat_scroll_;
+        target_->PushAxisAlignedClip(D2D1::RectF(text_x, chat_top, text_x + text_w, chat_bottom),
+                                     D2D1_ANTIALIAS_MODE_ALIASED);
+        brush->SetColor(rgba(0xF3F4F7));
+        target_->DrawTextLayout(D2D1::Point2F(text_x, draw_y), chat_layout, brush);
         target_->PopAxisAlignedClip();
-        if (input && std::fmod(t, 1.0f) < 0.6f) {
+
+        if (chat_content_h_ > chat_viewport_h_ + 1.0f) {
+            const float track_h = chat_viewport_h_;
+            const float thumb_h = std::max(18.0f * s, track_h * (chat_viewport_h_ / chat_content_h_));
+            const float max_scroll = chat_content_h_ - chat_viewport_h_;
+            const float thumb_y = chat_top + (max_scroll > 0 ? (1.0f - chat_scroll_ / max_scroll) * (track_h - thumb_h) : 0);
+            brush->SetColor(rgba(0xFFFFFF, 0.18f));
+            target_->FillRectangle(D2D1::RectF(width - pad - 3.0f * s, thumb_y, width - pad, thumb_y + thumb_h), brush);
+        }
+        y = chat_bottom + gap;
+    }
+
+    if (confirming) {
+        const float bw = 104.0f * s;
+        const float bh = button_h;
+        const float bx = text_x;
+        auto draw_button = [&](float x, uint32_t fill, const wchar_t* label, float* box) {
+            D2D1_ROUNDED_RECT r = {D2D1::RectF(x, y, x + bw, y + bh), 8.0f * s, 8.0f * s};
+            brush->SetColor(rgba(fill, 0.22f));
+            target_->FillRoundedRectangle(r, brush);
+            brush->SetColor(rgba(fill, 0.85f));
+            target_->DrawRoundedRectangle(r, brush, 1.2f);
+            IDWriteTextLayout* text = nullptr;
+            dwrite_->CreateTextLayout(label, static_cast<UINT32>(wcslen(label)), hint_format_, bw, bh, &text);
+            if (text) {
+                text->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                DWRITE_TEXT_METRICS lm{};
+                text->GetMetrics(&lm);
+                brush->SetColor(rgba(0xFFFFFF, 0.95f));
+                target_->DrawTextLayout(D2D1::Point2F(x, y + (bh - lm.height) / 2), text, brush);
+                safe_release(text);
+            }
+            box[0] = x;
+            box[1] = y;
+            box[2] = x + bw;
+            box[3] = y + bh;
+        };
+        draw_button(bx, 0x2EC4B6, L"Allow  \u21B5", allow_button_);
+        draw_button(bx + bw + 10.0f * s, 0xFF4D6D, L"Deny  Esc", deny_button_);
+        y += bh + gap;
+    }
+
+    if (composer && prompt_layout) {
+        brush->SetColor(rgba(0xFFFFFF, 0.08f));
+        target_->FillRectangle(D2D1::RectF(text_x, y, text_x + text_w, y + 1.0f * s), brush);
+        y += 4.0f * s;
+        const float field_top = y;
+        brush->SetColor(rgba(0xFFFFFF, 0.06f));
+        D2D1_ROUNDED_RECT field = {D2D1::RectF(text_x - 4.0f * s, field_top, text_x + text_w + 4.0f * s, field_top + prompt_h),
+                                   8.0f * s, 8.0f * s};
+        target_->FillRoundedRectangle(field, brush);
+        brush->SetColor(prompt_placeholder ? rgba(0x6E7280) : rgba(0xF3F4F7));
+        target_->DrawTextLayout(D2D1::Point2F(text_x, field_top + 5.0f * s), prompt_layout, brush);
+        if (composer_active() && !prompt_placeholder && std::fmod(t, 1.0f) < 0.55f) {
             FLOAT cx = 0, cy = 0;
             DWRITE_HIT_TEST_METRICS hit{};
-            const UINT32 pos = view_.body.empty() ? 0 : static_cast<UINT32>(view_.body.size());
-            body_layout->HitTestTextPosition(pos, FALSE, &cx, &cy, &hit);
+            const UINT32 pos = static_cast<UINT32>(view_.prompt.size());
+            prompt_layout->HitTestTextPosition(pos, FALSE, &cx, &cy, &hit);
             brush->SetColor(rgba(0x4CC9F0));
-            target_->FillRectangle(D2D1::RectF(text_x + cx, y + cy + 2 * s, text_x + cx + 1.6f * s, y + cy + hit.height - 2 * s),
-                                   brush);
+            target_->FillRectangle(
+                D2D1::RectF(text_x + cx, field_top + 5.0f * s + cy + 2 * s, text_x + cx + 1.6f * s,
+                            field_top + 5.0f * s + cy + hit.height - 2 * s),
+                brush);
         }
-        y += body_h;
+        y = field_top + prompt_h + 4.0f * s;
     }
+
     if (hint) {
-        y += 8.0f * s;
         brush->SetColor(rgba(0x7C8090));
         target_->DrawTextLayout(D2D1::Point2F(text_x, y), hint, brush);
     }
@@ -386,7 +517,8 @@ void Overlay::render() {
     safe_release(stops);
     safe_release(brush);
     safe_release(heading);
-    safe_release(body_layout);
+    safe_release(chat_layout);
+    safe_release(prompt_layout);
     safe_release(hint);
     if (hr == D2DERR_RECREATE_TARGET) {
         safe_release(target_);
@@ -412,14 +544,19 @@ LRESULT Overlay::handle(UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case WM_MOUSEACTIVATE:
             return interactive_ ? MA_ACTIVATE : MA_NOACTIVATE;
+        case WM_MOUSEWHEEL: {
+            if (!visible_) break;
+            const int delta = GET_WHEEL_DELTA_WPARAM(wp);
+            scroll_by(static_cast<float>(delta) * 0.4f * scale());
+            render();
+            return 0;
+        }
         case WM_ACTIVATE:
             if (LOWORD(wp) == WA_INACTIVE && input_active()) {
-                // Apps that re-activate themselves right after losing focus would otherwise close the
-                // input box before the user sees it; reclaim focus once.
-                // A mouse button held down means the user clicked elsewhere on purpose.
                 const bool fresh = std::chrono::steady_clock::now() - shown_at_ < std::chrono::milliseconds(1500);
                 const bool clicked = (GetAsyncKeyState(VK_LBUTTON) | GetAsyncKeyState(VK_RBUTTON) |
-                                      GetAsyncKeyState(VK_MBUTTON)) & 0x8000;
+                                      GetAsyncKeyState(VK_MBUTTON)) &
+                                     0x8000;
                 if (fresh && !clicked && !focus_reclaimed_) {
                     focus_reclaimed_ = true;
                     wchar_t cls[64] = L"";
@@ -433,45 +570,71 @@ LRESULT Overlay::handle(UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         case WM_APP:
-            if (input_active()) force_foreground(hwnd_);
+            if (composer_active() || confirm_active()) force_foreground(hwnd_);
             return 0;
+        case WM_LBUTTONUP: {
+            if (!confirm_active() || !callbacks_.on_confirm) break;
+            const float x = static_cast<float>(GET_X_LPARAM(lp));
+            const float y = static_cast<float>(GET_Y_LPARAM(lp));
+            auto inside = [x, y](const float* b) {
+                return x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3];
+            };
+            if (inside(allow_button_)) callbacks_.on_confirm(true);
+            else if (inside(deny_button_)) callbacks_.on_confirm(false);
+            return 0;
+        }
         case WM_KEYDOWN:
-            if (!input_active()) break;
+            if (confirm_active()) {
+                if (!callbacks_.on_confirm) return 0;
+                if (wp == VK_RETURN || wp == 'Y') callbacks_.on_confirm(true);
+                else if (wp == VK_ESCAPE || wp == 'N') callbacks_.on_confirm(false);
+                return 0;
+            }
+            if (!composer_active()) break;
             if (wp == VK_ESCAPE) {
                 if (callbacks_.on_cancel) callbacks_.on_cancel();
             } else if (wp == VK_RETURN) {
-                std::wstring text = view_.body;
-                if (!text.empty() && callbacks_.on_submit) callbacks_.on_submit(std::move(text));
+                std::wstring text = view_.prompt;
+                if (!text.empty() && callbacks_.on_submit) {
+                    view_.prompt.clear();
+                    callbacks_.on_submit(std::move(text));
+                }
             } else if (wp == 'V' && (GetKeyState(VK_CONTROL) & 0x8000)) {
                 std::wstring paste = get_clipboard_text();
                 for (wchar_t& c : paste) {
                     if (c == L'\r' || c == L'\n' || c == L'\t') c = L' ';
                 }
-                view_.body += paste;
+                view_.prompt += paste;
                 render();
             } else if (wp == VK_BACK && (GetKeyState(VK_CONTROL) & 0x8000)) {
-                auto& b = view_.body;
+                auto& b = view_.prompt;
                 while (!b.empty() && b.back() == L' ') b.pop_back();
                 while (!b.empty() && b.back() != L' ') b.pop_back();
+                render();
+            } else if (wp == VK_PRIOR) {
+                scroll_by(chat_viewport_h_ * 0.8f);
+                render();
+            } else if (wp == VK_NEXT) {
+                scroll_by(-chat_viewport_h_ * 0.8f);
                 render();
             }
             return 0;
         case WM_CHAR:
-            if (!input_active()) break;
+            if (!composer_active()) break;
             if (wp == VK_BACK) {
                 if (GetKeyState(VK_CONTROL) & 0x8000) return 0;
-                if (!view_.body.empty()) {
-                    view_.body.pop_back();
-                    if (!view_.body.empty() && IS_HIGH_SURROGATE(view_.body.back())) view_.body.pop_back();
+                if (!view_.prompt.empty()) {
+                    view_.prompt.pop_back();
+                    if (!view_.prompt.empty() && IS_HIGH_SURROGATE(view_.prompt.back())) view_.prompt.pop_back();
                 }
                 render();
             } else if (wp >= 0x20 && wp != 0x7F) {
-                view_.body += static_cast<wchar_t>(wp);
+                view_.prompt += static_cast<wchar_t>(wp);
                 render();
             }
             return 0;
         case WM_SETCURSOR:
-            SetCursor(LoadCursorW(nullptr, interactive_ ? IDC_IBEAM : IDC_ARROW));
+            SetCursor(LoadCursorW(nullptr, confirm_active() ? IDC_HAND : (interactive_ ? IDC_IBEAM : IDC_ARROW)));
             return TRUE;
     }
     return DefWindowProcW(hwnd_, msg, wp, lp);

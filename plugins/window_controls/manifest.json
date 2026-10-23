@@ -1,0 +1,70 @@
+{
+  "id": "window_controls",
+  "name": "Window Controls",
+  "version": "1.0.0",
+  "description": "Focus, snap, minimize and move windows across monitors.",
+  "type": "native",
+  "entry": "window_controls.dll",
+  "timeout_ms": 5000,
+  "intents": [
+    {
+      "name": "focus_window",
+      "description": "Bring a window to the foreground by title or process name",
+      "patterns": [
+        "(switch to|focus|activate|show) [the] {name} [window]",
+        "(переключись|покажи|відкрий вікно) [на] {name}"
+      ],
+      "parameters": {
+        "name": { "type": "string", "description": "Window title or process name fragment" }
+      }
+    },
+    {
+      "name": "snap_left",
+      "description": "Snap the active (or named) window to the left half of the monitor",
+      "patterns": [
+        "snap [the] [window] left",
+        "tile [the] [window] left",
+        "snap left",
+        "вікно [на] ліво",
+        "приліпи [вікно] зліва"
+      ]
+    },
+    {
+      "name": "snap_right",
+      "description": "Snap the active (or named) window to the right half of the monitor",
+      "patterns": [
+        "snap [the] [window] right",
+        "tile [the] [window] right",
+        "snap right",
+        "вікно [на] право",
+        "приліпи [вікно] справа"
+      ]
+    },
+    {
+      "name": "maximize_window",
+      "description": "Maximize the active or named window",
+      "patterns": ["maximize [the] [window]", "maximize", "розгорни [вікно]"]
+    },
+    {
+      "name": "minimize_window",
+      "description": "Minimize the active or named window",
+      "patterns": ["minimize [the] [window]", "minimize", "згорни [вікно]"]
+    },
+    {
+      "name": "minimize_others",
+      "description": "Minimize every window except the active one",
+      "patterns": [
+        "minimize (others|everything else|all other windows)",
+        "згорни (інші|решту) [вікна]"
+      ]
+    },
+    {
+      "name": "move_to_next_monitor",
+      "description": "Move the active window to the next monitor",
+      "patterns": [
+        "move [this|the] [window] to [the] (other|next) (monitor|screen|display)",
+        "перенеси [вікно] на (інший|наступний) (монітор|екран)"
+      ]
+    }
+  ]
+}

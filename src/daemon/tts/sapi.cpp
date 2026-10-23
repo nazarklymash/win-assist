@@ -5,6 +5,7 @@
 
 #include "common/log.h"
 #include "common/strings.h"
+#include "daemon/tts/piper.h"
 
 namespace wa {
 
@@ -41,7 +42,13 @@ bool Tts::ensure_voice(const TtsConfig& config) {
 }
 
 void Tts::speak(std::wstring_view text, const TtsConfig& config) {
-    if (text.empty() || !ensure_voice(config)) return;
+    if (text.empty()) return;
+    const bool prefer_piper = config.engine == "piper" || (config.engine == "auto" && piper_available(config));
+    if (prefer_piper && piper_speak(text, config)) return;
+    if (config.engine == "piper") {
+        log::warn("piper TTS requested but unavailable; falling back to SAPI");
+    }
+    if (!ensure_voice(config)) return;
     voice_->SetRate(config.rate < -10 ? -10 : config.rate > 10 ? 10 : config.rate);
     std::wstring copy(text);
     voice_->Speak(copy.c_str(), SPF_ASYNC | SPF_PURGEBEFORESPEAK | SPF_IS_NOT_XML, nullptr);

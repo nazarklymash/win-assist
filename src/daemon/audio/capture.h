@@ -20,7 +20,8 @@ public:
     AudioCapture();
     ~AudioCapture();
 
-    bool start(int max_seconds, std::string& error);
+    // device_id empty = default capture endpoint.
+    bool start(int max_seconds, std::string& error, std::string device_id = {});
     std::vector<float> stop();
     void abort();
     bool active() const { return thread_.joinable(); }
@@ -36,6 +37,7 @@ private:
     std::mutex mutex_;
     std::vector<float> samples_;
     std::string start_error_;
+    std::string device_id_;
     std::atomic<float> level_{0.0f};
     size_t max_samples_ = 0;
 };

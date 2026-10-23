@@ -52,6 +52,9 @@ typedef struct wa_host_api {
     void (*free_string)(void* host, char* text);
     /* Current daemon configuration as JSON; release with free_string. */
     char* (*config_json)(void* host);
+    /* Schedule a local reminder. delay_ms in [1000, 86400000]. Returns 0 on
+     * success. May be NULL on older hosts — check before calling. */
+    int (*schedule_reminder)(void* host, int delay_ms, const char* message_utf8);
 } wa_host_api;
 
 typedef struct wa_plugin_info {

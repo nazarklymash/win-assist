@@ -74,3 +74,27 @@ TEST_CASE("intents hidden from the LLM are not tools") {
     REQUIRE(m);
     CHECK(build_tools({*m}).tools.empty());
 }
+
+TEST_CASE("capabilities come from the plugin and the intent") {
+    auto j = json::parse(kManifest);
+    j["capabilities"] = json::array({"launch"});
+    j["intents"][0]["capabilities"] = json::array({"shell", "launch"});
+    j["intents"][0]["always_confirm"] = true;
+    std::string error;
+    auto m = parse_manifest(j, "", error);
+    REQUIRE_MESSAGE(m, error);
+    const auto& caps = m->intents[0].capabilities;
+    // Plugin-wide first, intent additions appended without duplicates.
+    REQUIRE(caps.size() == 2);
+    CHECK(caps[0] == "launch");
+    CHECK(caps[1] == "shell");
+    CHECK(m->intents[0].always_confirm);
+}
+
+TEST_CASE("intents default to no capabilities and no forced confirmation") {
+    std::string error;
+    auto m = parse_manifest(json::parse(kManifest), "", error);
+    REQUIRE(m);
+    CHECK(m->intents[0].capabilities.empty());
+    CHECK_FALSE(m->intents[0].always_confirm);
+}

@@ -22,6 +22,12 @@ TEST_CASE("normalize strips STT punctuation and whitespace") {
     CHECK(Router::normalize("...") == "");
 }
 
+TEST_CASE("normalize peels polite filler") {
+    CHECK(Router::normalize("Can you open Discord for me please?") == "open Discord");
+    CHECK(Router::normalize("hey could you launch Spotify") == "launch Spotify");
+    CHECK(Router::normalize("будь ласка відкрий Discord") == "відкрий Discord");
+}
+
 TEST_CASE("captures parameters case-insensitively") {
     Router r;
     REQUIRE(r.add("open_app", make_intent("open_application", {"[please] (open|launch) [the] {app_name}"}), nullptr));
@@ -55,6 +61,53 @@ TEST_CASE("more specific patterns win") {
     auto m = r.match("volume up");
     REQUIRE(m);
     CHECK(m->intent == "volume_up");
+}
+
+TEST_CASE("soft match catches loose open phrasing") {
+    Router r;
+    REQUIRE(r.add("open_app", make_intent("open_application", {"[please] (open|launch) [the] {app_name}"}), nullptr));
+    REQUIRE(r.add("file_search",
+                  make_intent("find_file", {"[please] open [my|the] {query} (file|document|report|pdf)"}), nullptr));
+
+    auto m = r.match("can you fire up Discord for me");
+    REQUIRE(m);
+    CHECK(m->plugin_id == "open_app");
+    CHECK(m->parameters["app_name"] == "discord");
+
+    m = r.match("find my invoice pdf");
+    REQUIRE(m);
+    CHECK(m->plugin_id == "file_search");
+}
+
+TEST_CASE("open app is not stolen by file search") {
+    // file_search used to make the trailing "file|document|..." optional, so
+    // "open Discord" matched find_file (more literal_chars) instead of open_app.
+    Router r;
+    REQUIRE(r.add("file_search",
+                  make_intent("find_file", {"[please] open [my|the] {query} (file|document|report|pdf)",
+                                            "відкрий [мій] (файл|документ) {query}"}),
+                  nullptr));
+    REQUIRE(r.add("open_app", make_intent("open_application", {"[please] (open|launch) [the] {app_name}",
+                                                               "(відкрий|запусти) {app_name}"}),
+                  nullptr));
+
+    auto app = r.match("Open the Discord");
+    REQUIRE(app);
+    CHECK(app->plugin_id == "open_app");
+    CHECK(app->parameters["app_name"] == "Discord");
+
+    auto app2 = r.match("Open Discord.");
+    REQUIRE(app2);
+    CHECK(app2->plugin_id == "open_app");
+
+    auto file = r.match("open my invoice file");
+    REQUIRE(file);
+    CHECK(file->plugin_id == "file_search");
+    CHECK(file->parameters["query"] == "invoice");
+
+    auto ua = r.match("відкрий Discord");
+    REQUIRE(ua);
+    CHECK(ua->plugin_id == "open_app");
 }
 
 TEST_CASE("multiple captures and trailing optional words") {
@@ -94,4 +147,32 @@ TEST_CASE("unicode utterances") {
     auto m = r.match("Відкрий Блокнот");
     REQUIRE(m);
     CHECK(m->parameters["app_name"] == "Блокнот");
+}
+
+TEST_CASE("selection and bilingual patterns") {
+    Router r;
+    REQUIRE(r.add("b", make_intent("summarize_selection",
+                                   {"summarize [this|that|it|the selection]", "підсумуй [це|це виділення]"}),
+                  nullptr));
+    REQUIRE(r.add("b", make_intent("translate_selection",
+                                   {"translate [this|that] [to|into] {language}", "переклади [це] [на|у] {language}"}),
+                  nullptr));
+    REQUIRE(r.add("s", make_intent("volume_up", {"louder", "гучніше"}), nullptr));
+
+    auto a = r.match("Summarize this");
+    REQUIRE(a);
+    CHECK(a->intent == "summarize_selection");
+
+    auto b = r.match("Підсумуй це");
+    REQUIRE(b);
+    CHECK(b->intent == "summarize_selection");
+
+    auto c = r.match("переклади це на English");
+    REQUIRE(c);
+    CHECK(c->intent == "translate_selection");
+    CHECK(c->parameters["language"] == "English");
+
+    auto d = r.match("Гучніше");
+    REQUIRE(d);
+    CHECK(d->intent == "volume_up");
 }

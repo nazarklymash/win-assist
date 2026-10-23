@@ -7,6 +7,7 @@
 #include <cmath>
 
 #include "common/log.h"
+#include "common/strings.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -21,13 +22,14 @@ AudioCapture::~AudioCapture() {
     CloseHandle(ready_event_);
 }
 
-bool AudioCapture::start(int max_seconds, std::string& error) {
+bool AudioCapture::start(int max_seconds, std::string& error, std::string device_id) {
     if (thread_.joinable()) abort();
     {
         std::lock_guard lock(mutex_);
         samples_.clear();
         samples_.reserve(static_cast<size_t>(kSampleRate) * 8);
         start_error_.clear();
+        device_id_ = std::move(device_id);
     }
     max_samples_ = static_cast<size_t>(kSampleRate) * static_cast<size_t>(max_seconds > 0 ? max_seconds : 30);
     level_ = 0.0f;
@@ -76,8 +78,19 @@ void AudioCapture::run() {
         HANDLE buffer_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
 
         hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&enumerator));
-        if (SUCCEEDED(hr)) hr = enumerator->GetDefaultAudioEndpoint(eCapture, eConsole, &device);
-        if (FAILED(hr)) {
+        if (SUCCEEDED(hr)) {
+            std::string id;
+            {
+                std::lock_guard lock(mutex_);
+                id = device_id_;
+            }
+            if (!id.empty()) {
+                hr = enumerator->GetDevice(to_wide(id).c_str(), &device);
+                if (FAILED(hr)) log::warn("audio: configured device missing, falling back to default");
+            }
+            if (!device) hr = enumerator->GetDefaultAudioEndpoint(eCapture, eConsole, &device);
+        }
+        if (FAILED(hr) || !device) {
             fail("no microphone found");
         } else {
             hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(client.GetAddressOf()));

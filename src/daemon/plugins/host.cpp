@@ -1,5 +1,6 @@
 #include "daemon/plugins/host.h"
 
+#include <algorithm>
 #include <cstring>
 
 #include "common/log.h"
@@ -24,6 +25,7 @@ PluginHost::PluginHost(PluginServices services) : services_(std::move(services))
     api_.ollama_post = &PluginHost::host_ollama_post;
     api_.free_string = &PluginHost::host_free_string;
     api_.config_json = &PluginHost::host_config_json;
+    api_.schedule_reminder = &PluginHost::host_schedule_reminder;
 }
 
 PluginHost::~PluginHost() { unload(); }
@@ -50,11 +52,83 @@ char* PluginHost::host_config_json(void* host) {
     return self->services_.config_json ? dup_string(self->services_.config_json()) : nullptr;
 }
 
+int PluginHost::host_schedule_reminder(void* host, int delay_ms, const char* message) {
+    auto* self = static_cast<PluginHost*>(host);
+    if (!self->services_.schedule_reminder) return 1;
+    return self->services_.schedule_reminder(delay_ms, message ? message : "");
+}
+
 const PluginManifest* PluginHost::find(const std::string& id) const {
     for (const auto& m : manifests_) {
         if (m.id == id) return &m;
     }
     return nullptr;
+}
+
+const IntentDef* PluginHost::find_intent(const std::string& plugin_id, const std::string& intent) const {
+    const PluginManifest* m = find(plugin_id);
+    if (!m) return nullptr;
+    for (const auto& i : m->intents) {
+        if (i.name == intent) return &i;
+    }
+    return nullptr;
+}
+
+void PluginHost::set_permissions(const PermissionsConfig& permissions) {
+    std::lock_guard lock(permissions_mutex_);
+    permissions_ = permissions;
+}
+
+std::string PluginHost::check_permission(const PluginManifest& m, const IntentDef& intent,
+                                         const nlohmann::json& params) {
+    PermissionsConfig policy;
+    {
+        std::lock_guard lock(permissions_mutex_);
+        policy = permissions_;
+    }
+    if (!policy.enabled) return {};
+    if (intent.capabilities.empty() && !intent.always_confirm) return {};
+
+    const std::string key = m.id + "/" + intent.name;
+    auto listed = [](const std::vector<std::string>& list, const std::string& value) {
+        return std::find(list.begin(), list.end(), value) != list.end();
+    };
+
+    for (const auto& cap : intent.capabilities) {
+        if (listed(policy.deny, cap)) {
+            if (policy.audit) log::warn("permission: denied {} (capability '{}' is blocked)", key, cap);
+            return "That action is blocked by your permission settings (" + cap + ").";
+        }
+    }
+
+    if (listed(policy.allow_intents, key)) {
+        if (policy.audit) log::info("permission: {} pre-approved", key);
+        return {};
+    }
+
+    bool needs_confirm = intent.always_confirm;
+    std::string reason;
+    for (const auto& cap : intent.capabilities) {
+        if (listed(policy.confirm, cap)) {
+            needs_confirm = true;
+            reason = cap;
+            break;
+        }
+    }
+    if (!needs_confirm) return {};
+
+    if (!services_.confirm) {
+        log::warn("permission: no confirmation UI available, refusing {}", key);
+        return "This action needs confirmation, but no prompt is available.";
+    }
+
+    std::string detail = intent.description.empty() ? key : intent.description;
+    if (params.is_object() && !params.empty()) detail += "\n" + params.dump();
+    if (policy.audit) log::info("permission: asking to allow {} ({})", key, reason.empty() ? "always_confirm" : reason);
+    const bool allowed = services_.confirm("Allow " + intent.name + "?", detail, policy.confirm_timeout_ms);
+    if (policy.audit) log::info("permission: {} {}", key, allowed ? "ALLOWED by user" : "DENIED");
+    if (!allowed) return "Cancelled \u2014 you did not approve " + intent.name + ".";
+    return {};
 }
 
 bool PluginHost::load_native(const PluginManifest& m, std::string& error) {
@@ -137,6 +211,12 @@ ActionResult PluginHost::invoke(const std::string& plugin_id, const std::string&
                                 const InvokeContext& ctx, const std::atomic<bool>& cancel) {
     const PluginManifest* m = find(plugin_id);
     if (!m) return ActionResult::error("Unknown plugin '" + plugin_id + "'.");
+
+    if (const IntentDef* def = find_intent(plugin_id, intent)) {
+        if (std::string refusal = check_permission(*m, *def, params); !refusal.empty()) {
+            return ActionResult::error(refusal);
+        }
+    }
 
     nlohmann::json request = {
         {"intent", intent},

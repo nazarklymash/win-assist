@@ -1,0 +1,44 @@
+{
+  "id": "focus_assist",
+  "name": "Focus & Display",
+  "version": "1.0.0",
+  "description": "Night light and Focus Assist (Do Not Disturb).",
+  "type": "native",
+  "entry": "focus_assist.dll",
+  "timeout_ms": 5000,
+  "intents": [
+    {
+      "name": "night_light_on",
+      "description": "Enable Windows night light (warm display)",
+      "patterns": [
+        "[please] (enable|turn on|start) [the] night light",
+        "нічне світло [увімкни|ввімкни]",
+        "увімкни нічне світло"
+      ]
+    },
+    {
+      "name": "night_light_off",
+      "description": "Disable Windows night light",
+      "patterns": [
+        "[please] (disable|turn off|stop) [the] night light",
+        "вимкни нічне світло"
+      ]
+    },
+    {
+      "name": "focus_assist_on",
+      "description": "Enable Focus Assist / Do Not Disturb",
+      "patterns": [
+        "[please] (enable|turn on) (focus assist|do not disturb|dnd|quiet hours)",
+        "увімкни (не турбувати|фокус)"
+      ]
+    },
+    {
+      "name": "focus_assist_off",
+      "description": "Disable Focus Assist / Do Not Disturb",
+      "patterns": [
+        "[please] (disable|turn off) (focus assist|do not disturb|dnd|quiet hours)",
+        "вимкни (не турбувати|фокус)"
+      ]
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 #include "core/manifest.h"
 
+#include <algorithm>
 #include <fstream>
 #include <map>
 #include <sstream>
@@ -45,6 +46,8 @@ std::optional<PluginManifest> parse_manifest(const nlohmann::json& j, const std:
         m.entry = j.at("entry").get<std::string>();
         m.runtime = j.value("runtime", m.kind == PluginKind::Native ? "" : "exe");
         m.timeout_ms = j.value("timeout_ms", 10000);
+        // Plugin-wide capabilities apply to every intent it declares.
+        auto plugin_caps = j.value("capabilities", std::vector<std::string>{});
 
         for (const auto& ji : j.at("intents")) {
             IntentDef intent;
@@ -56,6 +59,13 @@ std::optional<PluginManifest> parse_manifest(const nlohmann::json& j, const std:
             intent.description = ji.value("description", "");
             intent.patterns = ji.value("patterns", std::vector<std::string>{});
             intent.expose_to_llm = ji.value("expose_to_llm", true);
+            intent.capabilities = plugin_caps;
+            for (auto& c : ji.value("capabilities", std::vector<std::string>{})) {
+                if (std::find(intent.capabilities.begin(), intent.capabilities.end(), c) == intent.capabilities.end()) {
+                    intent.capabilities.push_back(std::move(c));
+                }
+            }
+            intent.always_confirm = ji.value("always_confirm", false);
             if (auto params = ji.find("parameters"); params != ji.end()) {
                 for (const auto& [name, jp] : params->items()) {
                     IntentParam p;

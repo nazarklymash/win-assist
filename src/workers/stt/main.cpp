@@ -10,8 +10,10 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -31,12 +33,7 @@ void quiet_log(enum ggml_log_level level, const char* text, void*) {
 
 bool send_json(HANDLE pipe, const json& j) { return wa::ipc::write_frame(pipe, j.dump()); }
 
-std::string transcribe(whisper_context* ctx, std::vector<float>& pcm, const std::string& language, int threads,
-                       std::string& detected) {
-    // whisper needs at least one second of audio; pad short clips with silence.
-    constexpr size_t kMinSamples = WHISPER_SAMPLE_RATE + WHISPER_SAMPLE_RATE / 10;
-    if (pcm.size() < kMinSamples) pcm.resize(kMinSamples, 0.0f);
-
+whisper_full_params base_params(int threads) {
     whisper_full_params params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
     params.n_threads = threads;
     params.no_context = true;
@@ -46,18 +43,56 @@ std::string transcribe(whisper_context* ctx, std::vector<float>& pcm, const std:
     params.print_progress = false;
     params.print_realtime = false;
     params.print_timestamps = false;
-    params.suppress_nst = true;
-    params.language = language.empty() ? "auto" : language.c_str();
+    // suppress_nst drops too much on short push-to-talk clips.
+    params.suppress_nst = false;
+    return params;
+}
+
+std::string run_whisper(whisper_context* ctx, std::vector<float>& pcm, const char* language, int threads,
+                        std::string& detected) {
+    whisper_full_params params = base_params(threads);
+    params.language = language;
     params.detect_language = false;
-
     if (whisper_full(ctx, params, pcm.data(), static_cast<int>(pcm.size())) != 0) return {};
-
     std::string text;
     int segments = whisper_full_n_segments(ctx);
     for (int i = 0; i < segments; ++i) text += whisper_full_get_segment_text(ctx, i);
     const char* lang = whisper_lang_str(whisper_full_lang_id(ctx));
     detected = lang ? lang : "";
     return wa::trim(text);
+}
+
+// whisper.cpp with language="auto" + detect_language often returns an empty
+// transcript after detecting the language. Detect first, then decode with that
+// code (falling back to English, then Ukrainian).
+std::string transcribe(whisper_context* ctx, std::vector<float>& pcm, const std::string& language, int threads,
+                       std::string& detected) {
+    constexpr size_t kMinSamples = WHISPER_SAMPLE_RATE + WHISPER_SAMPLE_RATE / 10;
+    if (pcm.size() < kMinSamples) pcm.resize(kMinSamples, 0.0f);
+
+    const bool auto_lang = language.empty() || language == "auto";
+    if (!auto_lang) return run_whisper(ctx, pcm, language.c_str(), threads, detected);
+
+    std::string lang_code = "en";
+    {
+        whisper_full_params params = base_params(threads);
+        params.language = "en";  // required seed; detection overwrites it
+        params.detect_language = true;
+        // Use a short prefix so detection stays cheap on long holds.
+        const int n = static_cast<int>(std::min(pcm.size(), static_cast<size_t>(WHISPER_SAMPLE_RATE * 3)));
+        if (whisper_full(ctx, params, pcm.data(), n) == 0) {
+            const char* lang = whisper_lang_str(whisper_full_lang_id(ctx));
+            if (lang && *lang) lang_code = lang;
+        }
+    }
+
+    std::string text = run_whisper(ctx, pcm, lang_code.c_str(), threads, detected);
+    if (!text.empty() && text != "[BLANK_AUDIO]") return text;
+
+    // Retry the other of EN/UK when the first pass is blank (common mix-up).
+    const char* fallback = lang_code == "uk" ? "en" : "uk";
+    text = run_whisper(ctx, pcm, fallback, threads, detected);
+    return text;
 }
 
 }  // namespace

@@ -1,0 +1,25 @@
+{
+  "id": "reminders",
+  "name": "Reminders",
+  "version": "1.0.0",
+  "description": "Schedule a short local reminder (tray notification).",
+  "type": "native",
+  "entry": "reminders.dll",
+  "timeout_ms": 3000,
+  "intents": [
+    {
+      "name": "set_reminder",
+      "description": "Remind the user after a number of minutes",
+      "patterns": [
+        "remind me [in] {when} [to|about] {message}",
+        "remind me [in] {when}",
+        "нагадай [мені] [через] {when} [про] {message}",
+        "нагадай [мені] [через] {when}"
+      ],
+      "parameters": {
+        "when": { "type": "string", "description": "Delay like '10 minutes', '1 hour', '30'" },
+        "message": { "type": "string", "description": "What to remind about", "required": false }
+      }
+    }
+  ]
+}

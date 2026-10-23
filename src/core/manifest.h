@@ -26,6 +26,11 @@ struct IntentDef {
     // When false the intent is only reachable through explicit patterns, never
     // offered to the LLM as a tool.
     bool expose_to_llm = true;
+    // Capability tags ("process_kill", "shell", "power", …) checked against
+    // config.permissions before the intent runs.
+    std::vector<std::string> capabilities;
+    // Forces a yes/no prompt regardless of capability configuration.
+    bool always_confirm = false;
 };
 
 enum class PluginKind { Native, Script, Builtin };

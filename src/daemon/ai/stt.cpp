@@ -77,7 +77,7 @@ std::optional<Transcript> SttClient::transcribe(const std::vector<float>& pcm16k
     t.text = trim(j.value("text", ""));
     t.language = j.value("language", "");
     t.ms = j.value("ms", 0LL);
-    log::info("transcribed {} samples in {} ms", pcm16k.size(), t.ms);
+    log::info("transcribed {} samples in {} ms (lang={}, text=\"{}\")", pcm16k.size(), t.ms, t.language, t.text);
     return t;
 }
 

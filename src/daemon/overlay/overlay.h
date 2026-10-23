@@ -14,20 +14,25 @@ struct IDWriteTextFormat;
 namespace wa {
 
 struct OverlayView {
-    enum class Mode { Listening, Input, Processing, Response, Error };
+    enum class Mode { Listening, Input, Processing, Response, Error, Confirm };
     Mode mode = Mode::Listening;
     std::wstring heading;
-    std::wstring body;
+    // Scrollable assistant transcript (prior turns + current answer).
+    std::wstring chat;
+    // Composer line the user types into (Input / Response / Error).
+    std::wstring prompt;
     std::wstring hint;
 };
 
-// Frameless, top-most, click-through panel rendered with Direct2D into a
-// per-pixel-alpha layered window. It never takes focus except in Input mode.
+// Frameless, top-most layered panel. Interactive for chat+composer modes;
+// click-through while Listening.
 class Overlay {
 public:
     struct Callbacks {
         std::function<void(std::wstring)> on_submit;
         std::function<void()> on_cancel;
+        // Confirm mode answer: true = allow, false = deny.
+        std::function<void(bool)> on_confirm;
     };
 
     Overlay() = default;
@@ -39,14 +44,18 @@ public:
     void configure(int width_dip, bool at_top);
     void show(const OverlayView& view, HWND anchor);
     void update(const OverlayView& view);
-    void append_body(std::wstring_view text);
+    void append_chat(std::wstring_view text);
     void set_level(float level) { level_ = level; }
     void hide();
 
     bool visible() const { return visible_; }
+    // True while the user can type in the composer (not Listening).
+    bool composer_active() const;
+    // First-ask Input mode only (blur cancels).
     bool input_active() const { return view_.mode == OverlayView::Mode::Input && visible_; }
+    // Modal allow/deny prompt: keyboard focused, but no text entry.
+    bool confirm_active() const { return view_.mode == OverlayView::Mode::Confirm && visible_; }
     HWND hwnd() const { return hwnd_; }
-    // True when hidden for at least `d` (used to drop GPU/text resources).
     bool hidden_for(std::chrono::milliseconds d) const;
     void release_resources();
 
@@ -60,6 +69,8 @@ private:
     void tick();
     void place(int width, int height);
     float scale() const;
+    void scroll_by(float delta_px);
+    void stick_chat_to_bottom();
 
     HWND hwnd_ = nullptr;
     HWND anchor_ = nullptr;
@@ -74,6 +85,14 @@ private:
     float fade_target_ = 0.0f;
     float level_ = 0.0f;
     float level_smoothed_ = 0.0f;
+    // Pixels the chat is scrolled up from the bottom (0 = follow latest).
+    float chat_scroll_ = 0.0f;
+    float chat_content_h_ = 0.0f;
+    float chat_viewport_h_ = 0.0f;
+    bool stick_bottom_ = true;
+    // Confirm-mode button hit boxes in window pixels: {left, top, right, bottom}.
+    float allow_button_[4] = {};
+    float deny_button_[4] = {};
     std::chrono::steady_clock::time_point shown_at_{};
     std::chrono::steady_clock::time_point last_tick_{};
     std::chrono::steady_clock::time_point hidden_at_{};

@@ -16,8 +16,12 @@
 #include "daemon/ai/stt.h"
 #include "daemon/assistant.h"
 #include "daemon/audio/capture.h"
+#include "daemon/audio/devices.h"
+#include "daemon/memory/memory.h"
 #include "daemon/overlay/overlay.h"
 #include "daemon/plugins/host.h"
+#include "daemon/system/reminders.h"
+#include "daemon/system/triggers.h"
 #include "daemon/tray.h"
 #include "daemon/tts/sapi.h"
 
@@ -61,10 +65,17 @@ private:
     void set_state(State state);
     void ensure_maintenance();
     void maintenance();
+    void poll_triggers();
 
     void show_tray_menu();
     void on_menu(UINT id);
     std::wstring hotkey_label(const std::string& text) const;
+
+    // Called on the assistant's worker thread; blocks until the user answers
+    // the overlay prompt or `timeout_ms` elapses (which denies).
+    bool ask_permission(const std::string& title, const std::string& detail, int timeout_ms);
+    void show_confirm_prompt();
+    void answer_confirm(bool allowed);
 
     HINSTANCE instance_ = nullptr;
     HWND hwnd_ = nullptr;
@@ -83,6 +94,7 @@ private:
     std::unique_ptr<SttClient> stt_;
     std::unique_ptr<PluginHost> plugins_;
     std::unique_ptr<Assistant> assistant_;
+    MemoryStore memory_;
     std::thread warm_thread_;
     std::thread inject_thread_;
 
@@ -98,7 +110,26 @@ private:
     bool escape_registered_ = false;
     bool insert_registered_ = false;
     bool maintenance_running_ = false;
+    bool pin_response_ = false;
     std::vector<std::string> menu_models_;
+    std::vector<AudioDevice> menu_mics_;
+    ReminderService reminders_;
+    TriggerEngine triggers_;
+    // Recent conversation lines shown above the latest answer in the overlay.
+    std::vector<std::wstring> conversation_;
+
+    // Pending permission prompt shared with the assistant worker thread.
+    struct PendingConfirm {
+        std::wstring title;
+        std::wstring detail;
+        bool allowed = false;
+        bool answered = false;
+    };
+    std::mutex confirm_mutex_;
+    PendingConfirm confirm_;
+    HANDLE confirm_event_ = nullptr;
+    bool confirm_active_ = false;
+    OverlayView pre_confirm_view_;
 };
 
 }  // namespace wa

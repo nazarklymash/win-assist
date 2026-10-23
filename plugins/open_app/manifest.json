@@ -13,7 +13,9 @@
       "description": "Open or launch an installed application by its name",
       "patterns": [
         "[please] (open|launch) [the] {app_name}",
-        "[please] (open|launch) [the] {app_name} app"
+        "[please] (open|launch) [the] {app_name} app",
+        "[будь ласка] (відкрий|запусти) [програму|додаток] {app_name}",
+        "[будь ласка] (відкрий|запусти) {app_name}"
       ],
       "parameters": {
         "app_name": { "type": "string", "description": "Application name, e.g. notepad, Spotify, Visual Studio Code" }

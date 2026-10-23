@@ -54,15 +54,18 @@ bool type_unicode(std::wstring_view text) {
     return true;
 }
 
-bool send_paste() {
+bool send_chord(WORD vk) {
     std::vector<INPUT> inputs = {
         key_input(VK_CONTROL, 0, 0),
-        key_input('V', 0, 0),
-        key_input('V', 0, KEYEVENTF_KEYUP),
+        key_input(vk, 0, 0),
+        key_input(vk, 0, KEYEVENTF_KEYUP),
         key_input(VK_CONTROL, 0, KEYEVENTF_KEYUP),
     };
     return send_inputs(inputs);
 }
+
+bool send_paste() { return send_chord('V'); }
+bool send_copy() { return send_chord('C'); }
 
 bool open_clipboard_retry() {
     for (int i = 0; i < 10; ++i) {
@@ -174,6 +177,61 @@ bool inject_text(const TargetInfo& target, std::wstring_view text, std::string& 
     if (!previous.empty()) set_clipboard_text(previous, true);
     if (!ok) error = "Paste was blocked by the target window.";
     return ok;
+}
+
+bool capture_selection(const TargetInfo& target, std::wstring& out, std::string& error) {
+    out.clear();
+    if (!target.window || !IsWindow(target.window)) {
+        error = "The target window is gone.";
+        return false;
+    }
+    if (target.elevated && !current_process_elevated()) {
+        error = "The target app runs as administrator; Windows blocks reading its selection.";
+        return false;
+    }
+
+    wait_for_modifier_release(1500);
+    if (GetForegroundWindow() != target.window) {
+        force_foreground(target.window);
+        for (int i = 0; i < 25 && GetForegroundWindow() != target.window; ++i) Sleep(20);
+        if (target.focus && IsWindow(target.focus)) {
+            DWORD thread = GetWindowThreadProcessId(target.window, nullptr);
+            DWORD self = GetCurrentThreadId();
+            if (AttachThreadInput(self, thread, TRUE)) {
+                SetFocus(target.focus);
+                AttachThreadInput(self, thread, FALSE);
+            }
+        }
+        Sleep(40);
+    }
+
+    const std::wstring previous = get_clipboard_text();
+    // Marker so we can tell a successful copy from a no-op.
+    if (!set_clipboard_text(L"\x200Bwin-assist-sel\x200B", true)) {
+        error = "Could not open the clipboard.";
+        return false;
+    }
+    if (!send_copy()) {
+        error = "Copy was blocked by the target window.";
+        if (!previous.empty()) set_clipboard_text(previous, true);
+        return false;
+    }
+
+    std::wstring selected;
+    for (int i = 0; i < 20; ++i) {
+        Sleep(30);
+        selected = get_clipboard_text();
+        if (selected != L"\x200Bwin-assist-sel\x200B") break;
+    }
+    if (!previous.empty()) set_clipboard_text(previous, true);
+    else set_clipboard_text(L"", true);
+
+    if (selected.empty() || selected == L"\x200Bwin-assist-sel\x200B") {
+        error = "Nothing is selected. Highlight some text first.";
+        return false;
+    }
+    out = std::move(selected);
+    return true;
 }
 
 }  // namespace wa

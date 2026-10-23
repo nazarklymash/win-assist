@@ -9,14 +9,18 @@
 #include "common/log.h"
 #include "common/paths.h"
 #include "common/strings.h"
+#include "daemon/ai/gpu.h"
+#include "daemon/audio/devices.h"
 #include "daemon/system/autostart.h"
 #include "daemon/system/inject.h"
+#include "daemon/tts/piper.h"
 
 namespace wa {
 namespace {
 
 constexpr UINT kMsgTray = WM_APP + 1;
 constexpr UINT kMsgSession = WM_APP + 2;
+constexpr UINT kMsgConfirm = WM_APP + 4;
 
 constexpr int kHotkeyAssistant = 1;
 constexpr int kHotkeyDictation = 2;
@@ -26,6 +30,12 @@ constexpr int kHotkeyInsert = 4;
 constexpr UINT_PTR kTimerPoll = 10;
 constexpr UINT_PTR kTimerDismiss = 11;
 constexpr UINT_PTR kTimerMaintenance = 12;
+constexpr UINT_PTR kTimerReminders = 13;
+constexpr UINT_PTR kTimerTriggers = 14;
+
+constexpr UINT kMenuMicBase = 400;
+constexpr UINT kMenuContinue = 140;
+constexpr UINT kMenuPin = 141;
 
 enum MenuId : UINT {
     kMenuStatus = 100,
@@ -48,14 +58,31 @@ void open_path(const std::filesystem::path& p) {
     ShellExecuteW(nullptr, L"open", p.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
+std::wstring format_chat(const std::vector<std::wstring>& turns) {
+    std::wstring out;
+    for (size_t i = 0; i < turns.size(); ++i) {
+        if (i) out += L"\n\n";
+        out += turns[i];
+    }
+    return out;
+}
+
 }  // namespace
 
 App::App() = default;
 
 App::~App() {
+    if (confirm_event_) {
+        // Release anything still blocked in ask_permission before we tear down.
+        SetEvent(confirm_event_);
+    }
     if (assistant_) {
         assistant_->cancel();
         assistant_->join();
+    }
+    if (confirm_event_) {
+        CloseHandle(confirm_event_);
+        confirm_event_ = nullptr;
     }
     if (warm_thread_.joinable()) warm_thread_.join();
     if (inject_thread_.joinable()) inject_thread_.join();
@@ -87,9 +114,43 @@ void App::save_config() {
 void App::apply_config() {
     providers_->apply_config(config_);
     stt_->set_config(config_.stt);
+    if (plugins_) plugins_->set_permissions(config_.permissions);
     overlay_.configure(config_.overlay.width, config_.overlay.position == "top");
     register_hotkeys();
+    if (autostart::enabled() != config_.start_with_windows) {
+        if (!autostart::set_enabled(config_.start_with_windows)) {
+            log::warn("autostart: failed to {}", config_.start_with_windows ? "enable" : "disable");
+        } else {
+            log::info("autostart: {}", config_.start_with_windows ? "enabled (starts with Windows)" : "disabled");
+        }
+    }
     tray_.set_tooltip(L"win-assist \u2014 hold " + hotkey_label(config_.hotkeys.assistant) + L" to talk, tap to type");
+
+    KillTimer(hwnd_, kTimerTriggers);
+    triggers_.set_rules(config_.triggers.enabled ? config_.triggers.rules : std::vector<TriggerRule>{});
+    if (!triggers_.empty()) {
+        const int period = std::clamp(config_.triggers.poll_sec, 2, 300) * 1000;
+        SetTimer(hwnd_, kTimerTriggers, static_cast<UINT>(period), nullptr);
+        log::info("triggers: {} rule(s), polling every {} s", config_.triggers.rules.size(), period / 1000);
+    }
+}
+
+void App::poll_triggers() {
+    const auto now_sec = static_cast<int64_t>(GetTickCount64() / 1000);
+    for (const TriggerFire& fire : triggers_.evaluate(take_snapshot(), now_sec)) {
+        log::info("trigger '{}' fired", fire.rule);
+        if (!fire.notify.empty()) {
+            const std::wstring message = to_wide(fire.notify);
+            tray_.notify(L"win-assist", message);
+            if (config_.tts.enabled) tts_.speak(message, config_.tts);
+        }
+        // Only hand work to the assistant when nothing else is in flight, so a
+        // trigger never steals a session the user started.
+        if (!fire.ask.empty() && state_ == State::Idle && !assistant_->busy()) {
+            open_input();
+            submit_text(to_wide(fire.ask));
+        }
+    }
 }
 
 void App::reload_plugins() {
@@ -159,7 +220,10 @@ void App::set_state(State state) {
 
 void App::on_hotkey(int id) {
     if (id == kHotkeyEscape) {
-        dismiss();
+        // While a permission prompt is up, Esc denies it instead of killing the
+        // whole session (the worker is blocked waiting for an answer).
+        if (confirm_active_) answer_confirm(false);
+        else dismiss();
         return;
     }
     if (id == kHotkeyInsert) {
@@ -190,11 +254,11 @@ void App::begin_capture(SessionMode mode, unsigned vk, unsigned modifiers) {
     if (modifiers & (MOD_ALT | MOD_WIN)) send_menu_mask_key();
 
     std::string error;
-    if (!audio_.start(config_.stt.max_record_s, error)) {
+    if (!audio_.start(config_.stt.max_record_s, error, config_.stt.device_id)) {
         if (mode == SessionMode::Assistant) {
             open_input(L"Microphone unavailable (" + to_wide(error) + L"). Type instead.");
         } else {
-            view_ = {OverlayView::Mode::Error, L"Dictation", L"Microphone unavailable: " + to_wide(error), L""};
+            view_ = {OverlayView::Mode::Error, L"Dictation", L"", L"", L"Microphone unavailable: " + to_wide(error)};
             overlay_.show(view_, target_.window);
             set_state(State::Responding);
             schedule_dismiss(3500);
@@ -213,9 +277,9 @@ void App::on_ptt_poll() {
     if (state_ == State::PttPending) {
         if (down && elapsed.count() >= config_.hotkeys.tap_threshold_ms) {
             const bool dictation = mode_ == SessionMode::Dictation;
-            view_ = {OverlayView::Mode::Listening, dictation ? L"Dictating" : L"Listening",
-                     L"", L"Release " + hotkey_label(dictation ? config_.hotkeys.dictation : config_.hotkeys.assistant) +
-                              L" when you're done"};
+            view_ = {OverlayView::Mode::Listening, dictation ? L"Dictating" : L"Listening", L"", L"",
+                     L"Release " + hotkey_label(dictation ? config_.hotkeys.dictation : config_.hotkeys.assistant) +
+                         L" when you're done"};
             overlay_.show(view_, target_.window);
             set_state(State::Listening);
             // Load whisper while the user is still talking.
@@ -227,8 +291,8 @@ void App::on_ptt_poll() {
             if (mode_ == SessionMode::Assistant) {
                 open_input();
             } else {
-                view_ = {OverlayView::Mode::Error, L"Dictation",
-                         L"Hold " + hotkey_label(config_.hotkeys.dictation) + L" while you speak.", L""};
+                view_ = {OverlayView::Mode::Error, L"Dictation", L"", L"",
+                         L"Hold " + hotkey_label(config_.hotkeys.dictation) + L" while you speak."};
                 overlay_.show(view_, target_.window);
                 set_state(State::Responding);
                 schedule_dismiss(2500);
@@ -248,7 +312,7 @@ void App::finish_capture() {
     std::vector<float> samples = audio_.stop();
     view_.mode = OverlayView::Mode::Processing;
     view_.heading = mode_ == SessionMode::Dictation ? L"Dictating" : L"Listening";
-    view_.body.clear();
+    view_.prompt.clear();
     view_.hint = L"Transcribing\u2026";
     overlay_.update(view_);
     set_state(State::Processing);
@@ -262,23 +326,89 @@ void App::finish_capture() {
 
 void App::open_input(const std::wstring& hint) {
     mode_ = SessionMode::Assistant;
-    view_ = {OverlayView::Mode::Input, L"Ask win-assist", L"",
-             hint.empty() ? L"Enter to send \u00B7 Esc to close \u00B7 hold " + hotkey_label(config_.hotkeys.assistant) +
-                                L" to talk"
-                          : hint};
+    KillTimer(hwnd_, kTimerDismiss);
+    view_.mode = OverlayView::Mode::Input;
+    view_.heading = L"Ask win-assist";
+    view_.chat = format_chat(conversation_);
+    view_.prompt.clear();
+    view_.hint = hint.empty() ? L"Enter to send \u00B7 mouse wheel to scroll \u00B7 Esc to close \u00B7 hold " +
+                                    hotkey_label(config_.hotkeys.assistant) + L" to talk"
+                              : hint;
     set_state(State::Input);
     overlay_.show(view_, target_.window);
 }
 
 void App::submit_text(std::wstring text) {
-    if (state_ != State::Input) return;
-    view_ = {OverlayView::Mode::Processing, L"\u201C" + text + L"\u201D", L"", L"Thinking\u2026"};
+    if (state_ != State::Input && state_ != State::Responding) return;
+    KillTimer(hwnd_, kTimerDismiss);
+    if (!text.empty()) {
+        conversation_.push_back(L"You: " + text);
+        if (conversation_.size() > 12) conversation_.erase(conversation_.begin());
+    }
+    view_.mode = OverlayView::Mode::Processing;
+    view_.heading = L"\u201C" + text + L"\u201D";
+    view_.chat = format_chat(conversation_);
+    view_.prompt.clear();
+    view_.hint = L"Thinking\u2026";
     overlay_.update(view_);
     set_state(State::Processing);
     SessionRequest request;
     request.mode = SessionMode::Assistant;
     request.text = to_utf8(text);
     start_session(std::move(request));
+}
+
+bool App::ask_permission(const std::string& title, const std::string& detail, int timeout_ms) {
+    if (!confirm_event_) return false;
+    {
+        std::lock_guard lock(confirm_mutex_);
+        confirm_ = {to_wide(title), to_wide(detail), false, false};
+    }
+    ResetEvent(confirm_event_);
+    PostMessageW(hwnd_, kMsgConfirm, 0, 0);
+    const DWORD wait = WaitForSingleObject(confirm_event_, static_cast<DWORD>(std::max(1000, timeout_ms)));
+    std::lock_guard lock(confirm_mutex_);
+    if (wait != WAIT_OBJECT_0 || !confirm_.answered) {
+        log::warn("permission: prompt timed out, denying");
+        // Let the UI drop the prompt even though nobody answered it.
+        PostMessageW(hwnd_, kMsgConfirm, 1, 0);
+        return false;
+    }
+    return confirm_.allowed;
+}
+
+void App::show_confirm_prompt() {
+    std::wstring title, detail;
+    {
+        std::lock_guard lock(confirm_mutex_);
+        title = confirm_.title;
+        detail = confirm_.detail;
+    }
+    if (!confirm_active_) pre_confirm_view_ = view_;
+    confirm_active_ = true;
+    KillTimer(hwnd_, kTimerDismiss);
+    view_.mode = OverlayView::Mode::Confirm;
+    view_.heading = title;
+    view_.chat = detail;
+    view_.prompt.clear();
+    view_.hint = L"Enter / Y allows \u00B7 Esc / N denies \u00B7 denies automatically if you ignore it";
+    if (overlay_.visible()) overlay_.update(view_);
+    else overlay_.show(view_, target_.window);
+}
+
+void App::answer_confirm(bool allowed) {
+    if (!confirm_active_) return;
+    {
+        std::lock_guard lock(confirm_mutex_);
+        confirm_.allowed = allowed;
+        confirm_.answered = true;
+    }
+    confirm_active_ = false;
+    if (confirm_event_) SetEvent(confirm_event_);
+    // Back to the "thinking" view the session was in before we interrupted it.
+    view_ = pre_confirm_view_;
+    view_.hint = allowed ? L"Approved \u2014 running\u2026" : L"Denied.";
+    if (overlay_.visible()) overlay_.update(view_);
 }
 
 void App::start_session(SessionRequest request) {
@@ -299,41 +429,67 @@ void App::on_session_event(SessionEvent* raw) {
     if (event->session != session_id_ || state_ != State::Processing) return;
 
     switch (event->kind) {
-        case SessionEvent::Kind::Transcript:
-            view_.heading = L"\u201C" + to_wide(event->text) + L"\u201D";
+        case SessionEvent::Kind::Transcript: {
+            const std::wstring spoken = to_wide(event->text);
+            view_.heading = L"\u201C" + spoken + L"\u201D";
+            if (mode_ == SessionMode::Assistant && !spoken.empty()) {
+                conversation_.push_back(L"You: " + spoken);
+                if (conversation_.size() > 12) conversation_.erase(conversation_.begin());
+                view_.chat = format_chat(conversation_);
+                if (!view_.chat.empty()) view_.chat += L"\n\n";
+            }
             break;
+        }
         case SessionEvent::Kind::Status:
             view_.hint = to_wide(event->text);
             break;
         case SessionEvent::Kind::Reset:
-            view_.body.clear();
+            // Keep prior turns; clear only the in-progress answer suffix if any.
+            view_.chat = format_chat(conversation_);
+            if (!view_.chat.empty()) view_.chat += L"\n\n";
             break;
         case SessionEvent::Kind::Delta:
-            view_.body += to_wide(event->text);
+            view_.chat += to_wide(event->text);
             break;
         case SessionEvent::Kind::Done:
         case SessionEvent::Kind::Error: {
             const ActionResult& r = event->result;
-            last_answer_ = event->answer;
-            view_.mode = r.ok ? OverlayView::Mode::Response : OverlayView::Mode::Error;
-            if (!r.display.empty()) view_.body = to_wide(r.display);
-            if (event->injected) {
-                view_.hint = L"Inserted into " + (target_.process.empty() ? L"the active window" : target_.process);
-            } else if (!last_answer_.empty()) {
-                view_.hint = L"Alt+Enter to insert \u00B7 Esc to close";
-            } else {
-                view_.hint = L"Esc to close";
+            last_answer_ = event->answer.empty() ? r.display : event->answer;
+            if (r.ok && r.display.find("Starting a fresh") != std::string::npos) {
+                conversation_.clear();
+            } else if (r.ok && !r.display.empty()) {
+                conversation_.push_back(L"Assistant: " + to_wide(r.display));
+                if (conversation_.size() > 12) conversation_.erase(conversation_.begin());
             }
+            view_.mode = r.ok ? OverlayView::Mode::Response : OverlayView::Mode::Error;
+            view_.chat = format_chat(conversation_);
+            if (!r.ok && !r.display.empty()) {
+                if (!view_.chat.empty()) view_.chat += L"\n\n";
+                view_.chat += L"Error: " + to_wide(r.display);
+            }
+            view_.prompt.clear();
+            if (event->injected) {
+                view_.hint = L"Inserted \u00B7 type below to continue \u00B7 Esc close";
+            } else {
+                view_.hint = L"Type below to continue \u00B7 wheel to scroll \u00B7 Alt+Enter insert \u00B7 Esc close";
+            }
+            if (pin_response_) view_.hint += L" \u00B7 pinned";
             overlay_.update(view_);
             set_state(State::Responding);
+            // Keep composer focused so the user can keep chatting.
+            force_foreground(overlay_.hwnd());
+            SetFocus(overlay_.hwnd());
 
             const bool speak = r.ok && !r.speech.empty() && config_.tts.enabled &&
                                (session_voice_ || config_.tts.speak_typed_answers);
             if (speak) tts_.speak(to_wide(r.speech), config_.tts);
+            // Keep chat+composer open for assistant answers so the user can scroll / continue.
+            if (pin_response_ && r.ok) return;
+            if (r.ok && mode_ == SessionMode::Assistant && !event->injected) return;
             int ms;
             if (event->injected && mode_ == SessionMode::Dictation) ms = 1200;
             else if (!r.ok) ms = 4500;
-            else ms = std::clamp(2500 + static_cast<int>(view_.body.size()) * 45, config_.overlay.min_display_ms, 30000);
+            else ms = std::clamp(4000 + static_cast<int>(r.display.size()) * 40, config_.overlay.min_display_ms, 45000);
             schedule_dismiss(ms);
             return;
         }
@@ -359,6 +515,8 @@ void App::schedule_dismiss(int ms) { SetTimer(hwnd_, kTimerDismiss, static_cast<
 void App::dismiss() {
     KillTimer(hwnd_, kTimerPoll);
     KillTimer(hwnd_, kTimerDismiss);
+    // Never leave the worker thread blocked on an unanswered prompt.
+    if (confirm_active_) answer_confirm(false);
     if (audio_.active()) audio_.abort();
     if (assistant_->busy()) assistant_->cancel();
     tts_.stop();
@@ -426,7 +584,26 @@ void App::show_tray_menu() {
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(models_menu), L"Ollama model");
 
     AppendMenuW(menu, MF_STRING | (config_.tts.enabled ? MF_CHECKED : 0), kMenuSpeak, L"Speak answers");
-    AppendMenuW(menu, MF_STRING | (autostart::enabled() ? MF_CHECKED : 0), kMenuAutostart, L"Start with Windows");
+    if (piper_available(config_.tts)) {
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"TTS: Piper available");
+    }
+    AppendMenuW(menu, MF_STRING | (config_.start_with_windows ? MF_CHECKED : 0), kMenuAutostart, L"Start with Windows");
+
+    HMENU mic_menu = CreatePopupMenu();
+    menu_mics_ = list_capture_devices();
+    AppendMenuW(mic_menu, MF_STRING | (config_.stt.device_id.empty() ? MF_CHECKED : 0), kMenuMicBase,
+                L"System default");
+    for (size_t i = 0; i < menu_mics_.size() && i < 40; ++i) {
+        const bool current = !config_.stt.device_id.empty() && menu_mics_[i].id == config_.stt.device_id;
+        std::wstring label = to_wide(menu_mics_[i].name);
+        if (menu_mics_[i].is_default) label += L" (default)";
+        AppendMenuW(mic_menu, MF_STRING | (current ? MF_CHECKED : 0), kMenuMicBase + 1 + static_cast<UINT>(i),
+                    label.c_str());
+    }
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(mic_menu), L"Microphone");
+
+    AppendMenuW(menu, MF_STRING, kMenuContinue, L"Continue conversation\u2026");
+    AppendMenuW(menu, MF_STRING | (pin_response_ ? MF_CHECKED : 0), kMenuPin, L"Pin answers (no auto-hide)");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kMenuOpenConfig, L"Edit config");
     AppendMenuW(menu, MF_STRING, kMenuReload, L"Reload config && plugins");
@@ -451,12 +628,40 @@ void App::on_menu(UINT id) {
         apply_config();
         return;
     }
+    if (id == kMenuMicBase) {
+        config_.stt.device_id.clear();
+        save_config();
+        apply_config();
+        tray_.notify(L"win-assist", L"Microphone set to system default.");
+        return;
+    }
+    if (id > kMenuMicBase && id <= kMenuMicBase + menu_mics_.size()) {
+        config_.stt.device_id = menu_mics_[id - kMenuMicBase - 1].id;
+        save_config();
+        apply_config();
+        tray_.notify(L"win-assist", L"Microphone: " + to_wide(menu_mics_[id - kMenuMicBase - 1].name));
+        return;
+    }
     switch (id) {
         case kMenuProviderAuto: config_.llm.provider = "auto"; break;
         case kMenuProviderOllama: config_.llm.provider = "ollama"; break;
         case kMenuProviderLlama: config_.llm.provider = "llamacpp"; break;
         case kMenuSpeak: config_.tts.enabled = !config_.tts.enabled; break;
-        case kMenuAutostart: autostart::set_enabled(!autostart::enabled()); return;
+        case kMenuAutostart:
+            config_.start_with_windows = !config_.start_with_windows;
+            save_config();
+            apply_config();
+            tray_.notify(L"win-assist",
+                         config_.start_with_windows ? L"Will start with Windows." : L"Won't start with Windows.");
+            return;
+        case kMenuPin: pin_response_ = !pin_response_; return;
+        case kMenuContinue:
+            if (state_ == State::Idle || state_ == State::Responding) {
+                KillTimer(hwnd_, kTimerDismiss);
+                target_ = capture_target();
+                open_input(L"Continue the conversation\u2026");
+            }
+            return;
         case kMenuAsk:
             if (state_ == State::Idle) {
                 target_ = {};
@@ -516,10 +721,28 @@ LRESULT App::handle(UINT msg, WPARAM wp, LPARAM lp) {
                 }
             } else if (wp == kTimerMaintenance) {
                 maintenance();
+            } else if (wp == kTimerReminders) {
+                reminders_.tick();
+                if (reminders_.pending() == 0) KillTimer(hwnd_, kTimerReminders);
+            } else if (wp == kTimerTriggers) {
+                poll_triggers();
             }
             return 0;
         case kMsgSession:
             on_session_event(reinterpret_cast<SessionEvent*>(lp));
+            return 0;
+        case kMsgConfirm:
+            // wParam 1 = the worker gave up waiting; just drop the prompt.
+            if (wp == 1) {
+                if (confirm_active_) {
+                    confirm_active_ = false;
+                    view_ = pre_confirm_view_;
+                    view_.hint = L"Denied (no answer).";
+                    if (overlay_.visible()) overlay_.update(view_);
+                }
+            } else {
+                show_confirm_prompt();
+            }
             return 0;
         case kMsgTray:
             switch (LOWORD(lp)) {
@@ -564,6 +787,7 @@ int App::run(HINSTANCE instance) {
     if (!hwnd_) return 1;
     taskbar_created_ = RegisterWindowMessageW(L"TaskbarCreated");
     tray_.create(hwnd_, kMsgTray);
+    confirm_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 
     load_config();
     providers_ = std::make_unique<ProviderHub>(config_);
@@ -578,18 +802,44 @@ int App::run(HINSTANCE instance) {
         std::lock_guard lock(config_json_mutex_);
         return config_json_;
     };
+    services.schedule_reminder = [this](int delay_ms, const std::string& message) {
+        if (!reminders_.schedule(delay_ms, message)) return 1;
+        SetTimer(hwnd_, kTimerReminders, 1000, nullptr);
+        return 0;
+    };
+    services.confirm = [this](const std::string& title, const std::string& detail, int timeout_ms) {
+        return ask_permission(title, detail, timeout_ms);
+    };
     plugins_ = std::make_unique<PluginHost>(std::move(services));
-    assistant_ = std::make_unique<Assistant>(hwnd_, kMsgSession, *plugins_, *providers_, *stt_);
+    memory_.open(paths::app_data() / L"memory.jsonl", [this](const std::vector<std::string>& inputs) {
+        return providers_->ollama().embed(inputs);
+    });
+    assistant_ = std::make_unique<Assistant>(hwnd_, kMsgSession, *plugins_, *providers_, *stt_, memory_);
+    reminders_.set_notify(this, [](void* ctx, const std::wstring& message) {
+        auto* self = static_cast<App*>(ctx);
+        self->tray_.notify(L"win-assist reminder", message);
+        if (self->config_.tts.enabled) self->tts_.speak(message, self->config_.tts);
+    });
 
     Overlay::Callbacks callbacks;
     callbacks.on_submit = [this](std::wstring text) { submit_text(std::move(text)); };
     callbacks.on_cancel = [this] {
-        if (state_ == State::Input) dismiss();
+        // Esc (and Input blur) close the overlay; Response mode stays on blur alone.
+        if (state_ == State::Input || state_ == State::Responding) dismiss();
     };
+    callbacks.on_confirm = [this](bool allowed) { answer_confirm(allowed); };
     overlay_.create(instance, std::move(callbacks));
 
     apply_config();
+    // Persist newly introduced defaults (e.g. start_with_windows) into config.json.
+    save_config();
     reload_plugins();
+    if (const GpuMemory gpu = query_gpu_memory(); gpu.ok) {
+        log::info("gpu: {} \u2014 {} MB total, {} MB free of a {} MB budget", gpu.adapter, gpu.total_mb, gpu.free_mb,
+                  gpu.budget_mb);
+    } else {
+        log::info("gpu: no adapter info; model routing will not downgrade");
+    }
     log::info("ready: assistant={}, dictation={}, provider={}", config_.hotkeys.assistant, config_.hotkeys.dictation,
               config_.llm.provider);
     SetProcessWorkingSetSize(GetCurrentProcess(), static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1));

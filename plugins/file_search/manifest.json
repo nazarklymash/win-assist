@@ -1,0 +1,25 @@
+{
+  "id": "file_search",
+  "name": "File Search",
+  "version": "1.0.0",
+  "description": "Find and open files from Downloads, Documents, Desktop, and recent items.",
+  "type": "script",
+  "runtime": "powershell",
+  "entry": "file_search.ps1",
+  "timeout_ms": 15000,
+  "intents": [
+    {
+      "name": "find_file",
+      "description": "Search for a file by name and open the best match",
+      "patterns": [
+        "[please] (find|locate|search for) [the] [file] {query}",
+        "[please] open [my|the] {query} (file|document|report|pdf)",
+        "(знайди|шукай) [файл] {query}",
+        "відкрий [мій] (файл|документ) {query}"
+      ],
+      "parameters": {
+        "query": { "type": "string", "description": "File name fragment, e.g. invoice.pdf or downloads report" }
+      }
+    }
+  ]
+}

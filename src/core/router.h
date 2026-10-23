@@ -16,6 +16,8 @@ struct IntentMatch {
     std::string plugin_id;
     std::string intent;
     nlohmann::json parameters = nlohmann::json::object();
+    // 0 = hard pattern; higher soft scores are more confident keyword hits.
+    int score = 0;
 };
 
 struct CompiledPattern {
@@ -39,8 +41,8 @@ public:
     std::optional<IntentMatch> match(std::string_view utterance) const;
     size_t size() const { return rules_.size(); }
 
-    // Trims whitespace, surrounding quotes and trailing punctuation that
-    // speech-to-text tends to add ("Open notepad." -> "Open notepad").
+    // Trims whitespace/quotes/STT punctuation, then peels polite filler
+    // ("can you … please", "будь ласка …") so patterns don't need every phrasing.
     static std::string normalize(std::string_view utterance);
 
 private:
@@ -52,6 +54,9 @@ private:
         size_t literal_chars = 0;
     };
     std::vector<Rule> rules_;
+
+    std::optional<IntentMatch> match_hard(const std::wstring& text, const std::wstring& folded) const;
+    std::optional<IntentMatch> match_soft(const std::wstring& text, const std::wstring& folded) const;
 };
 
 }  // namespace wa

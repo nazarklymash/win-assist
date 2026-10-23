@@ -1,78 +1,377 @@
 {
   "id": "system_controls",
   "name": "System Controls",
-  "version": "1.0.0",
-  "description": "Volume, media playback, screen brightness, lock and sleep.",
+  "version": "1.2.0",
+  "description": "Volume, media, brightness, power, processes, shell, filesystem, clipboard and desktop control.",
   "type": "native",
   "entry": "system_controls.dll",
-  "timeout_ms": 5000,
+  "timeout_ms": 30000,
   "intents": [
     {
       "name": "volume_up",
       "description": "Increase system volume",
-      "patterns": ["(volume|sound) up", "turn [the] (volume|sound) up", "turn up the (volume|sound)", "louder"]
+      "patterns": ["(volume|sound) up", "turn [the] (volume|sound) up", "turn up the (volume|sound)", "louder",
+                   "збільш [гучність|звук]", "гучніше", "зроби (гучніше|голосніше)"]
     },
     {
       "name": "volume_down",
       "description": "Decrease system volume",
-      "patterns": ["(volume|sound) down", "turn [the] (volume|sound) down", "turn down the (volume|sound)", "quieter"]
+      "patterns": ["(volume|sound) down", "turn [the] (volume|sound) down", "turn down the (volume|sound)", "quieter",
+                   "зменш [гучність|звук]", "тихіше", "зроби (тихіше|тише)"]
     },
     {
       "name": "set_volume",
       "description": "Set system volume to a specific level",
-      "patterns": ["set [the] (volume|sound) to {level}", "(volume|sound) {level} [percent]"],
+      "patterns": ["set [the] (volume|sound) to {level}", "(volume|sound) {level} [percent]",
+                   "постав [гучність|звук] на {level}", "гучність {level} [відсотків]"],
       "parameters": {
-        "level": {
-          "type": "integer",
-          "description": "Volume percentage 0-100"
-        }
+        "level": { "type": "integer", "description": "Volume percentage 0-100" }
       }
     },
     {
       "name": "mute",
       "description": "Mute system sound",
-      "patterns": ["mute", "mute [the] (sound|volume|audio)"]
+      "patterns": ["mute", "mute [the] (sound|volume|audio)", "вимикай [звук]", "без звуку"]
     },
     {
       "name": "unmute",
       "description": "Unmute system sound",
-      "patterns": ["unmute", "unmute [the] (sound|volume|audio)"]
+      "patterns": ["unmute", "unmute [the] (sound|volume|audio)", "увімкни [звук]"]
     },
     {
       "name": "media_play_pause",
       "description": "Play or pause media",
-      "patterns": ["(play|pause|resume) [the] (music|media|song|video)", "(play|pause)"]
+      "patterns": ["(play|pause|resume) [the] (music|media|song|video)", "(play|pause)",
+                   "(грай|пауза|стоп|продовж) [музику|відео]"]
     },
     {
       "name": "media_next",
       "description": "Skip to the next media track",
-      "patterns": ["next (song|track)", "skip [this] (song|track)"]
+      "patterns": ["next (song|track)", "skip [this] (song|track)", "наступний (трек|пісня)"]
     },
     {
       "name": "media_previous",
       "description": "Go back to the previous media track",
-      "patterns": ["previous (song|track)", "go back a (song|track)"]
+      "patterns": ["previous (song|track)", "go back a (song|track)", "попередній (трек|пісня)"]
     },
     {
       "name": "set_brightness",
       "description": "Set screen brightness to a specific level",
-      "patterns": ["set [the] brightness to {level}", "brightness {level} [percent]"],
+      "patterns": ["set [the] brightness to {level}", "brightness {level} [percent]",
+                   "постав [яскравість] на {level}", "яскравість {level} [відсотків]"],
       "parameters": {
-        "level": {
-          "type": "integer",
-          "description": "Screen brightness percentage 0-100"
-        }
+        "level": { "type": "integer", "description": "Screen brightness percentage 0-100" }
       }
     },
     {
       "name": "lock_computer",
       "description": "Lock the computer screen",
-      "patterns": ["lock [the|my] (computer|pc|screen|workstation)"]
+      "capabilities": ["power_soft"],
+      "patterns": ["lock [the|my] (computer|pc|screen|workstation)", "заблокуй [комп|комп'ютер|екран]"]
     },
     {
       "name": "sleep_computer",
       "description": "Put the computer to sleep",
-      "patterns": ["put [the|my] (computer|pc) to sleep", "sleep [the|my] (computer|pc)"]
+      "capabilities": ["power_soft"],
+      "patterns": ["put [the|my] (computer|pc) to sleep", "sleep [the|my] (computer|pc)",
+                   "присипи [комп|комп'ютер]", "режим сну"]
+    },
+    {
+      "name": "list_processes",
+      "description": "List running processes, optionally filtered by name. Returns name, PID and memory.",
+      "capabilities": ["process_read"],
+      "patterns": [
+        "list [running] processes",
+        "show [running] processes",
+        "what processes [are] (running|open)",
+        "find [the] process {query}",
+        "list processes [named|matching] {query}",
+        "покажи [запущені] процеси",
+        "які процеси [запущені]",
+        "знайди процес {query}"
+      ],
+      "parameters": {
+        "query": { "type": "string", "description": "Optional substring of process name (e.g. chrome, notepad)" }
+      }
+    },
+    {
+      "name": "kill_process",
+      "description": "Terminate a process by executable name (e.g. notepad.exe) or numeric PID. Prefer name when the user names an app.",
+      "capabilities": ["process_kill"],
+      "patterns": [
+        "(kill|terminate|end|close|stop) [the] process {name}",
+        "(kill|terminate|end|stop) [the] {name} process",
+        "(kill|terminate|end|close) {name}",
+        "taskkill {name}",
+        "kill pid {pid}",
+        "kill process {pid}",
+        "(закрий|вбий|зупини|заверши) [процес] {name}",
+        "закрий {name}"
+      ],
+      "parameters": {
+        "name": { "type": "string", "description": "Process executable name, with or without .exe" },
+        "pid": { "type": "integer", "description": "Process ID to terminate" }
+      }
+    },
+    {
+      "name": "run_program",
+      "description": "Launch a program, shortcut, or document by path or known executable name",
+      "capabilities": ["launch"],
+      "patterns": [
+        "(run|launch|start|execute) [the] [program|app|executable] {program}",
+        "(run|launch|start) {program} [with] [args|arguments] {args}",
+        "запусти [програму] {program}",
+        "виконай {program}"
+      ],
+      "parameters": {
+        "program": { "type": "string", "description": "Executable path, file, or command (e.g. notepad, C:\\\\Tools\\\\app.exe)" },
+        "args": { "type": "string", "description": "Optional command-line arguments" }
+      }
+    },
+    {
+      "name": "open_path",
+      "description": "Open a file, folder, or URL with the default associated application",
+      "capabilities": ["launch"],
+      "patterns": [
+        "open [the] (file|folder|path|url|link) {path}",
+        "open {path}",
+        "відкрий [файл|папку|шлях|посилання] {path}",
+        "відкрий {path}"
+      ],
+      "parameters": {
+        "path": { "type": "string", "description": "File path, folder path, or URL" }
+      }
+    },
+    {
+      "name": "run_shell",
+      "description": "Run a PowerShell or cmd command on this PC and return stdout/stderr. Use for any system action not covered by other tools.",
+      "capabilities": ["shell"],
+      "patterns": [
+        "run [a] (shell|powershell|cmd|command) {command}",
+        "execute [the] (shell|powershell|cmd) [command] {command}",
+        "powershell {command}",
+        "cmd {command}",
+        "виконай [команду] {command}",
+        "powershell команду {command}"
+      ],
+      "parameters": {
+        "command": { "type": "string", "description": "The command line to run" },
+        "shell": {
+          "type": "string",
+          "description": "Shell to use: powershell (default) or cmd",
+          "enum": ["powershell", "cmd"]
+        }
+      }
+    },
+    {
+      "name": "shutdown_computer",
+      "description": "Shut down the computer after an optional delay in seconds (default 30)",
+      "capabilities": ["power"],
+      "patterns": [
+        "shut [the|my] (computer|pc|machine) down",
+        "shutdown [the|my] (computer|pc)",
+        "power off [the|my] (computer|pc)",
+        "вимкни [комп|комп'ютер]",
+        "виключи [комп|комп'ютер]"
+      ],
+      "parameters": {
+        "delay_seconds": { "type": "integer", "description": "Seconds before shutdown (0-600, default 30)" }
+      }
+    },
+    {
+      "name": "restart_computer",
+      "description": "Restart the computer after an optional delay in seconds (default 30)",
+      "capabilities": ["power"],
+      "patterns": [
+        "restart [the|my] (computer|pc|machine)",
+        "reboot [the|my] (computer|pc)",
+        "перезапусти [комп|комп'ютер]",
+        "перезавантаж [комп|комп'ютер]"
+      ],
+      "parameters": {
+        "delay_seconds": { "type": "integer", "description": "Seconds before restart (0-600, default 30)" }
+      }
+    },
+    {
+      "name": "hibernate_computer",
+      "description": "Hibernate the computer",
+      "capabilities": ["power_soft"],
+      "patterns": [
+        "hibernate [the|my] (computer|pc)",
+        "put [the|my] (computer|pc) into hibernation",
+        "гібернація",
+        "загібернуй [комп|комп'ютер]"
+      ]
+    },
+    {
+      "name": "log_off",
+      "description": "Sign out the current Windows user",
+      "capabilities": ["power"],
+      "patterns": [
+        "log (off|out)",
+        "sign out",
+        "вийди [з] [облікового] [запису]",
+        "вийти з системи"
+      ]
+    },
+    {
+      "name": "cancel_shutdown",
+      "description": "Cancel a pending shutdown or restart",
+      "capabilities": ["power_soft"],
+      "patterns": [
+        "cancel [the|pending] (shutdown|restart|reboot)",
+        "abort [the] shutdown",
+        "скасуй [вимкнення|перезавантаження]"
+      ]
+    },
+    {
+      "name": "empty_recycle_bin",
+      "description": "Empty the Windows Recycle Bin",
+      "capabilities": ["filesystem_write"],
+      "always_confirm": true,
+      "patterns": [
+        "empty [the] (recycle bin|trash|bin)",
+        "очисти [кошик]",
+        "порожній кошик"
+      ]
+    },
+    {
+      "name": "show_desktop",
+      "description": "Show the desktop by minimizing all windows",
+      "patterns": [
+        "show [the] desktop",
+        "minimize all [windows]",
+        "покажи [робочий] стіл",
+        "згорни всі [вікна]"
+      ]
+    },
+    {
+      "name": "set_clipboard",
+      "description": "Set the Windows clipboard to the given text",
+      "patterns": [
+        "set [the] clipboard [to] {text}",
+        "copy {text} to [the] clipboard",
+        "постав у буфер [обміну] {text}",
+        "скопиюй у буфер {text}"
+      ],
+      "parameters": {
+        "text": { "type": "string", "description": "Text to place on the clipboard" }
+      }
+    },
+    {
+      "name": "get_clipboard",
+      "description": "Read the current Windows clipboard text",
+      "patterns": [
+        "(get|read|show) [the] clipboard",
+        "what['s| is] [on|in] [the] clipboard",
+        "що в буфері [обміну]",
+        "покажи буфер [обміну]"
+      ]
+    },
+    {
+      "name": "list_directory",
+      "description": "List files and folders in a directory. Supports %USERPROFILE% etc.",
+      "capabilities": ["filesystem_read"],
+      "patterns": [
+        "list [the] (files|folder|directory|dir) [in|at|of] {path}",
+        "show [the] (files|contents) [in|of] {path}",
+        "ls {path}",
+        "dir {path}",
+        "покажи (файли|вміст) [у|в] {path}",
+        "список файлів [у|в] {path}"
+      ],
+      "parameters": {
+        "path": { "type": "string", "description": "Directory path, e.g. C:\\\\Users\\\\me\\\\Desktop or %USERPROFILE%\\\\Downloads" }
+      }
+    },
+    {
+      "name": "read_file",
+      "description": "Read a text file (up to 256 KB) and return its contents",
+      "capabilities": ["filesystem_read"],
+      "patterns": [
+        "read [the] file {path}",
+        "show [the] contents of [the] file {path}",
+        "cat {path}",
+        "прочитай файл {path}",
+        "покажи вміст файлу {path}"
+      ],
+      "parameters": {
+        "path": { "type": "string", "description": "File path to read" }
+      }
+    },
+    {
+      "name": "write_file",
+      "description": "Create or overwrite a text file with the given content",
+      "capabilities": ["filesystem_write"],
+      "always_confirm": true,
+      "patterns": [
+        "write [the] file {path}",
+        "save [text|content] to [the] file {path}",
+        "create [the] file {path}",
+        "запиши [у] файл {path}",
+        "створи файл {path}"
+      ],
+      "parameters": {
+        "path": { "type": "string", "description": "File path to write" },
+        "content": { "type": "string", "description": "Text content to write" }
+      }
+    },
+    {
+      "name": "delete_path",
+      "description": "Delete a file or folder. Set recursive=true to delete a non-empty folder.",
+      "capabilities": ["filesystem_write"],
+      "always_confirm": true,
+      "patterns": [
+        "(delete|remove|erase) [the] (file|folder|directory|path) {path}",
+        "(delete|remove) {path}",
+        "rm {path}",
+        "(видали|видали|стерти) [файл|папку] {path}",
+        "видали {path}"
+      ],
+      "parameters": {
+        "path": { "type": "string", "description": "File or folder path to delete" },
+        "recursive": { "type": "boolean", "description": "Delete folder contents recursively" }
+      }
+    },
+    {
+      "name": "copy_path",
+      "description": "Copy a file or folder to a new location",
+      "capabilities": ["filesystem_write"],
+      "patterns": [
+        "copy [the] (file|folder|path) {from} to {to}",
+        "copy {from} to {to}",
+        "скопіюй {from} [в|у|до] {to}"
+      ],
+      "parameters": {
+        "from": { "type": "string", "description": "Source path" },
+        "to": { "type": "string", "description": "Destination path" }
+      }
+    },
+    {
+      "name": "move_path",
+      "description": "Move or rename a file or folder",
+      "capabilities": ["filesystem_write"],
+      "patterns": [
+        "(move|rename) [the] (file|folder|path) {from} to {to}",
+        "(move|rename) {from} to {to}",
+        "(перемісти|перейменуй) {from} [в|у|до] {to}"
+      ],
+      "parameters": {
+        "from": { "type": "string", "description": "Source path" },
+        "to": { "type": "string", "description": "Destination path" }
+      }
+    },
+    {
+      "name": "get_system_info",
+      "description": "Report PC name, user, Windows version, CPU count, RAM, and battery",
+      "capabilities": ["process_read"],
+      "patterns": [
+        "(system|pc|computer) (info|information|status|specs)",
+        "how much (ram|memory) [do i have]",
+        "what['s| is] [my] (battery|os|windows) [level|version]",
+        "інфо [про] (систему|комп|комп'ютер)",
+        "скільки (оперативки|пам'яті|батареї)"
+      ]
     }
   ]
 }

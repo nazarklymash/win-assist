@@ -28,9 +28,19 @@ function(wa_add_script_plugin id)
 endfunction()
 
 wa_add_native_plugin(system_controls system_controls/system_controls.cpp)
-target_link_libraries(system_controls PRIVATE ole32 oleaut32 wbemuuid powrprof user32)
+target_link_libraries(system_controls PRIVATE ole32 oleaut32 wbemuuid powrprof user32 shell32 psapi)
 
 wa_add_native_plugin(clipboard_search clipboard_search/clipboard_search.cpp)
 target_link_libraries(clipboard_search PRIVATE user32)
 
+wa_add_native_plugin(window_controls window_controls/window_controls.cpp)
+target_link_libraries(window_controls PRIVATE user32 shell32)
+
+wa_add_native_plugin(focus_assist focus_assist/focus_assist.cpp)
+target_link_libraries(focus_assist PRIVATE shell32)
+
+wa_add_native_plugin(reminders reminders/reminders.cpp)
+
 wa_add_script_plugin(open_app)
+wa_add_script_plugin(file_search)
+wa_add_script_plugin(web_browse)
